@@ -1,0 +1,90 @@
+import { describe, expect, it } from 'vitest'
+import { load } from 'cheerio'
+import {
+  base64Decode,
+  base64Encode,
+  engineValueToString,
+  engineValueToStrings,
+  fmtTime,
+  hexDecodeToString,
+  md5Hex,
+  md5Hex16,
+  uriEncode,
+} from '../../src/engine/js-utils.js'
+
+/** 纯工具直测（「纯工具出走」）：
+ *  此前这些函数埋在 js-sandbox 模块私有，只能整体过 vm；现可不进沙箱直接钉行为。 */
+describe('js-utils 纯工具', () => {
+  it('md5Hex：标准向量（md5("abc")）', () => {
+    expect(md5Hex('abc')).toBe('900150983cd24fb0d6963f7d28e17f72')
+    expect(md5Hex('')).toBe('d41d8cd98f00b204e9800998ecf8427e')
+  })
+
+  it('md5Hex16：32 位 md5 取中 16 位（legado 语义）', () => {
+    expect(md5Hex16('abc')).toBe('3cd24fb0d6963f7d')
+    expect(md5Hex16('abc')).toBe(md5Hex('abc').slice(8, 24))
+  })
+
+  it('base64Encode/base64Decode 往返（含中文）', () => {
+    expect(base64Encode('abc')).toBe('YWJj')
+    expect(base64Decode('YWJj')).toBe('abc')
+    expect(base64Decode(base64Encode('你好,世界'))).toBe('你好,世界')
+    expect(base64Encode('')).toBe('')
+  })
+
+  it('uriEncode：encodeURIComponent 语义（中文/空格/斜杠全转义）', () => {
+    expect(uriEncode('书')).toBe('%E4%B9%A6')
+    expect(uriEncode('a b/c')).toBe('a%20b%2Fc')
+  })
+
+  it('hexDecodeToString：合法 hex → UTF-8；空/奇数长/非 hex → 空串（宁空不猜）', () => {
+    expect(hexDecodeToString('e4bda0')).toBe('你')
+    expect(hexDecodeToString('  E4BDA0  ')).toBe('你') // trim + 大小写不敏感
+    expect(hexDecodeToString('')).toBe('')
+    expect(hexDecodeToString('abc')).toBe('') // 奇数长
+    expect(hexDecodeToString('zz')).toBe('') // 非 hex 字符
+    expect(hexDecodeToString('0x12')).toBe('') // 前缀形态不支持 → 空串（与旧实现一致）
+  })
+
+  it('fmtTime：utc=true 钉死 UTC 分量', () => {
+    expect(fmtTime(0, true)).toBe('1970/01/01 00:00')
+    expect(fmtTime(1700000000000, true)).toBe('2023/11/14 22:13')
+    expect(fmtTime('1700000000000', true)).toBe('2023/11/14 22:13') // 字符串时间戳同样接受
+  })
+
+  it('fmtTime：utc=false 取本地分量（与环境时区一致）', () => {
+    const ts = 1700000000000
+    const d = new Date(ts)
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const expected = `${d.getFullYear()}/${p2(d.getMonth() + 1)}/${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
+    expect(fmtTime(ts, false)).toBe(expected)
+  })
+
+  it('fmtTime：非法输入 → 空串', () => {
+    expect(fmtTime('not-a-ts', false)).toBe('')
+    expect(fmtTime(Number.NaN, true)).toBe('')
+  })
+
+  it('engineValueToString：五种 EngineValue 口径', () => {
+    expect(engineValueToString({ kind: 'value', text: 'hi' })).toBe('hi')
+    expect(engineValueToString({ kind: 'list', items: ['a', 'b'] })).toBe('a\nb')
+    expect(engineValueToString({ kind: 'matches', rows: [['a', 'b'], ['c']] })).toBe('a\tb\nc')
+    const $ = load('<h1>标题</h1>')
+    // nodes 口径 = cheerio .html()（**内部** HTML，不含外层标签——与既有引擎行为一致）
+    expect(engineValueToString({ kind: 'nodes', nodes: $('h1') })).toBe('标题')
+    // 'outer' = @js host.result 口径（outerHTML）；同一实现在此显式分叉，不再两份抄本
+    expect(engineValueToString({ kind: 'nodes', nodes: $('h1') }, 'outer')).toBe('<h1>标题</h1>')
+    expect(engineValueToString({ kind: 'miss', detail: 'x' })).toBe('')
+  })
+
+  it('engineValueToStrings：五种 EngineValue 口径（value 按换行切分并滤空行）', () => {
+    expect(engineValueToStrings({ kind: 'value', text: 'a\nb\n\nc' })).toEqual(['a', 'b', 'c'])
+    expect(engineValueToStrings({ kind: 'list', items: ['a', 'b'] })).toEqual(['a', 'b'])
+    expect(engineValueToStrings({ kind: 'matches', rows: [['a', 'b'], ['c']] })).toEqual(['a\tb', 'c'])
+    const $ = load('<h1>标题</h1>')
+    expect(engineValueToStrings({ kind: 'nodes', nodes: $('h1') })).toEqual(['标题']) // 内部 HTML
+    const $empty = load('<div></div>')
+    expect(engineValueToStrings({ kind: 'nodes', nodes: $empty('h1') })).toEqual([]) // 空选择集 → []
+    expect(engineValueToStrings({ kind: 'miss', detail: 'x' })).toEqual([])
+  })
+})

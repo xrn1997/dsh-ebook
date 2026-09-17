@@ -1,0 +1,103 @@
+{
+  "name": "@xrn1997/dsh-novel",
+  "version": "0.1.2",
+  "description": "在 DeepSeek Harness Web GUI 里读网络小说：legado 书源导入、书架与连续滚动阅读，附五个 AI 助手工具",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "novel",
+    "ebook",
+    "legado",
+    "reader"
+  ],
+  "author": "xrn1997",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xrn1997/dsh-novel.git"
+  },
+  "homepage": "https://github.com/xrn1997/dsh-novel#readme",
+  "bugs": {
+    "url": "https://github.com/xrn1997/dsh-novel/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "prepare": "tsdown",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:compat": "vitest run --config vitest.compat.config.ts",
+    "test:pack": "pnpm build && vitest run --config vitest.pack.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "dom-serializer": "^3.0.0",
+    "domhandler": "^5.0.3",
+    "iconv-lite": "^0.7.3",
+    "undici": "7.29.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "jsdom": "^30.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsdown": "^0.23.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.1 <0.1.6-0 || >=0.1.6-rc.1 <0.2.0-0",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  }
+}

@@ -1,0 +1,117 @@
+# dsh-novel
+
+在 DeepSeek Harness Web GUI 里读网络小说的插件：导入 legado 书源 → 聚合搜索 → 书架 → 连续滚动阅读。本文件是领域词汇表——写 spec / 改代码 / 命名新 module 时用这里的词，别自造。
+
+词之外的**现状真相**（模块地图、关键口径与「为什么」、被否决的方案、已知开口）住三份子系统文档：`docs/design/engine.md`（规则引擎）、`docs/design/services.md`（服务层 / HTTP 面 / wire 契约 / 工具面）、`docs/design/client.md`（浏览器半）。
+
+## Language
+
+### 书源与规则
+
+**书源（book source）**:
+一个 legado 规则包：某站点的搜索 / 详情 / 目录 / 正文取值规则与其登录态的载体。
+_Avoid_: 站点、书站（书源是规则，不是站点本身）
+
+**源入库（source intake）**:
+「书源进入系统」的唯一语义：normalize → 按址去重 → add/replace（`services/intake.ts` 的 SourceIntake）。调用方只做呈现映射（任务 counts/issues、工具 ImportOutcome 投影）。
+_Avoid_: 导入逻辑（导入是调用方，不是规则本身）
+
+**方言（dialect）**:
+书源导出的三种形态——legado 平铺 / legado 对象（ruleSearch、ruleBookInfo…）/ Native（android-ebook 原生格式）。
+_Avoid_: 格式、模板
+
+**取值链（rule chain）**:
+书源规则的形态：`||` 分支、组合符与终端（@text / @href / @html…）构成的链。
+_Avoid_: 选择器链（选择器只是链的一段）
+
+**净化尾（replacement tail）**:
+取值链尾部的 `##pattern##replacement` 文本净化段。
+_Avoid_: 替换规则
+
+**规则文法（rule grammar）**:
+规则串的构词法——分支、终端、净化尾、占位符如何组合成一条规则。构词与解析应同属一处：唯一实现在 `engine/grammar.ts`（构词 appendTail/withImplicitText + 解析 parseTails + 词法 isJsForm/splitVarExpr），normalize 的方言拼串走 appendTail 的 round-trip 自校验，越界当场进 warning。
+_Avoid_: 规则格式
+
+**搜索面（search face）**:
+从「书源搜索规则 + 关键词」到「命中条目 + 首条书名」的完整请求语义；聚合搜索与探针共用同一份。
+_Avoid_: 搜索服务
+
+**请求组装（request assembly）**:
+「URL 模板 + 变量 + baseUrl」到「可执行请求计划」的唯一语义解释——method 判定、body 插值、POST 表单默认头、charset、init 姿态全在一处（services/request.ts 的 assembleRequest / fetchInitOf）。
+_Avoid_: 请求工具、fetch 封装（抓取与解码归守门 fetcher）
+
+### 面与段
+
+**面（facet）**:
+规则求值的上下文之一：rule / search / detail / toc / content。
+_Avoid_: 场景、模式
+
+**段（segment）**:
+取值链的一段。失败定位以「面 + 段序 + 段原文」表达（段级定位）。
+_Avoid_: 步骤
+
+**取值规约（reduction）**:
+链上空态裁决口径（**取位失败 → Miss；解析到空集合 → 空 List**）。Miss = 失败：选择零命中 / 排除后空 / 下标越界 / 切片裁空——链中穿透；空 List = 合法零条目：元素在而取值全空，或键存在且值为空数组。选择段（default/css）与取值段（getValue）的取位/空态裁决唯一实现在 `engine/select.ts` 的 `reducePicked`（zero/excluded/oob/sliced 四态皆「取位失败」）；取值段的「元素在、取值全空 → 空 List」住 `getValue`。JSONPath（`engine/jsonpath.ts`）同口径：零命中/越界/切片裁空 → Miss，空数组 → 空 List；下标与切片均支持负数从尾数（与 `select.applyIndex` 一致）。
+_Avoid_: 空结果（太泛——Miss 与空 List 是两种值）
+
+**探针（probe）**:
+对一个书源真发一次搜索请求，得出可用性实测结论。
+_Avoid_: 自测、健康检查
+
+### 身份与状态
+
+**书源注册表（source registry）**:
+书源清单的唯一载体（sources.json，含登录态，仅存本机）。
+_Avoid_: 源列表（UI 里的列表只是它的投影）
+
+**按址去重（dedup by address）**:
+书源入库规则：同一 baseUrl 已有**可用**源时保留已有、不新增（`skipped`）；同一 baseUrl 已有**不可用**源时用新条替换，并在替换时顺带清掉其余同键条目。唯一实现在 `services/intake.ts`（SourceIntake：normalize → 批内留首条 → 按址去重 → add/replace）——同步导入（工具面）与后台导入任务同一条路。
+_Avoid_: URL 去重
+
+**启停（enable / disable）**:
+停用的书源不参与聚合搜索；探针与试跑不受影响。停用不等于删除。
+_Avoid_: 删除、隐藏
+
+**bookKey**:
+书籍身份：详情页 URL；本地书为 `local:<uuid>`。
+_Avoid_: id、url（太泛）
+
+**本地书（local book）**:
+从本地 TXT 导入的书，源身份固定 `__local__`，与在线书源正交。
+
+**后台任务（background job）**:
+导入 / 批量验证跑在服务端的单任务槽：运行中互斥，结果保留到下一个任务开始。
+_Avoid_: 队列（不是队列，是单槽）
+
+**阅读会话（reader session）**:
+「目录 → 存档恢复 → 逐章懒加载 → 预取 → 进度落盘」的时序编排持有者（client/reader-session.ts）；DOM 测量经 ReaderPort 注入，视图只渲染与接线。
+_Avoid_: 阅读器状态管理（视图里的 state 只是它的投影）
+
+**判到底（翻页三闸）**:
+「下一页 / 下一目录页」何时停的唯一语义，唯一实现 `services/pagination.ts` 的 `followPages`（`stoppedBy` 五态）。次序钉死：**回环闸**（本页出现已见过的条目 → 软 404 防御，判到底）→ **零新增闸**（提取 0 条 → 空页之后的页不可信，不追 next）→ **上限闸**（`maxPages`：目录 200 / 正文 50）。正文面另加**串章闸**（末页「下一页」常指向下一章，`services/chapter-page.ts` 的 `isSameChapterPage` 判不准时宁漏页不串章）。
+_Avoid_: 翻页循环、重复过滤（太泛——判据是「出现重复条目」，不是「页空了」）
+
+**单在途槽（reader session）**:
+阅读会话同一时刻只允许一个章节加载在途（`inflight`）；滚动风暴与目录直达都只记意图（`pendingJump`），在途释放后由 `settlePendingLoad()` 补拉（否则那次点击无声消失）。刚失败过的同一章不自动重试——等用户点「重试」。唯一实现 `client/reader-session.ts`。
+_Avoid_: 请求去重（那是网络层语义；这是会话级时序）
+
+### 跨半契约
+
+**书目字段集（shelf metadata field-set）**:
+书架条目 7 个元数据字段（sourceId/title/author/coverUrl/intro/lastChapterName/totalChapters）的「名称 × 类型判别 × 归一化」唯一主人：`shared/wire.ts` 的 `SHELF_META` 表 + `pickShelfMeta`。Shelf.applyPatch 遍历表保值覆盖，shelfBody 与 dispatch.shelfPut 都从 pick 派生；加字段只改这张表。
+_Avoid_: 逐字段 typeof 筛键（那是这张表的抄本）
+
+**wire 契约（wire contract）**:
+`/novel-api` 规范 JSON 的值形状与路由名——Node 半与浏览器半之间的唯一真相，代码只许有一个主人。
+_Avoid_: API 文档（文档是它的抄本）
+
+**缺键投影（missing-key projection）**:
+工具面把空值字段从规范值中省略的投影——harness 的 lossless-JSON 约束下的职责，不是 wire 口径。
+_Avoid_: 字段过滤
+
+**规范值（canonical value）**:
+工具输出的完整 JSON 值；render 只是它的文本投影。
+
+**构建期纯度门（bundle purity gate）**:
+client bundle 的构建期守卫：平台模块表之外的 `@deepseek-ai/*` **值** import、或 Node 内建闯进浏览器 bundle → 构建立刻失败（type-only import 已被擦除，到不了这道门）。唯一实现 `tsdown.config.ts` 的 `dsh-novel-bundle-purity` 插件（`resolveId` 直接 throw）+ 平台模块表 `PLATFORM_MODULES`（两份官方样例的并集）。后果：`src/shared/wire.ts` 必须零运行时依赖——它被整个 inline 进 client bundle。
+_Avoid_: external / noExternal 配置（那是宿主侧 bundler 的事）

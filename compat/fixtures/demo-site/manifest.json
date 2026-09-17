@@ -1,0 +1,9 @@
+{
+  "keyword": "书",
+  "capturedAt": 1,
+  "pages": {
+    "https://demo.local/search?q=%E4%B9%A6": "pages/0.html",
+    "https://demo.local/book/1/": "pages/1.html",
+    "https://demo.local/c/1.html": "pages/2.html"
+  }
+}

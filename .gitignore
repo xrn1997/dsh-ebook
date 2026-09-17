@@ -1,0 +1,75 @@
+# 依赖与构建产物
+node_modules/
+lib/
+*.tsbuildinfo
+
+# 日志
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# 运行时数据
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# 覆盖率（istanbul/nyc/jest）
+coverage
+*.lcov
+.nyc_output
+lib-cov
+
+# 打包产物
+*.tgz
+.dist
+dist/
+
+# 缓存
+.npm
+.eslintcache
+.stylelintcache
+.cache
+.parcel-cache
+.node_repl_history
+
+# dotenv 环境变量文件
+.env
+.env.*
+!.env.example
+
+# 编辑器与操作系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# pnpm
+.pnpm-store
+
+# yarn v3
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# 本地调试临时文件（probe 页面等）——只忽略仓库根层：
+# 无斜杠的 `tmp-*` 会递归匹配任意深度，把 tests/ 下任何 tmp-*.ts 静默漏掉入库。
+/tmp-*
+
+# 迭代过程文档（任务简报 / 报告 / 审查草稿 / 采样脚本）不入库——留在本机
+.superpowers/
+
+# agent 的临时工作区（批量改写脚本、改动对照、动手前的文件备份）不入库
+.task-scratch/

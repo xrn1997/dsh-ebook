@@ -1,0 +1,286 @@
+# 服务层与双半契约
+
+本文是**服务层（`src/services/`）、HTTP 面（`src/api/`）、wire 契约（`src/shared/wire.ts`）与工具投影（`src/tools/`）的现状真相**（single source）；领域词汇见 `CONTEXT.md`——源入库、按址去重、书源注册表、启停、探针、请求组装、后台任务、书目字段集、wire 契约、缺键投影、规范值、本地书、bookKey 一律用那里的词，别自造。面向「下一个改服务层的人或 AI」：只讲口径与理由；操作步骤见 `README.md`，路由表与数据目录布局不在此重复抄。
+
+## 模块地图
+
+| 文件 | 职责 | 关键导出 |
+| --- | --- | --- |
+| `services/reading.ts` | 阅读链路门面：HTTP / 工具 / UI 三面的**唯一**业务入口 | `ReadingService.create/from`、`search/searchPlan`、`getDetail/getToc/getChapter`、`probe`、`shelfAdd/shelfPatch/shelfSaveProgress/removeBook`、`localImport/removeLocalBook`、`startImportJob/startBatchProbeJob/jobStatus`、`*Source*` 写侧动词、`flush`、`tocUrlOf`、`normalizeChapterText` |
+| `services/sources.ts` | 书源注册表：加载 / 原子变更 / 只读投影 / 合并落盘 | `SourceRegistry.load`、`edit/flush/list/get/toPublic`、`SourceEdit` |
+| `services/intake.ts` | 源入库：normalize → 批内留首条 → 按址去重 → add/replace | `SourceIntake`、`IntakeDecision`、`dedupKey` |
+| `services/import-job.ts` | 后台任务单槽（导入 / 批量验证） | `SourceJobs`、`JobRunningError`、`JobKind`、`ImportFile` |
+| `services/normalize.ts` | 三方言（legado 平铺 / legado 对象 / Native）→ 规范化规则集 | `normalizeSource`、`NormalizeResult`、`splitGroups`、`stripLeadingIcons`、`isNativeSource`、`SOURCE_KIND_LABEL` |
+| `services/request.ts` | 请求组装：模板 + 变量 + baseUrl → 可执行请求计划 | `assembleRequest`、`fetchInitOf`、`parseUrlOption`、`stripUrlOption`、`buildSearchRequest`、`RequestPlan` |
+| `services/search-face.ts` | 搜索面：JS 模板解析 → 组装 → 抓取解码 → 列表求值 → 条目 | `fetchSearchPage`、`searchErrorCodeOf`、`SearchFaceResult` |
+| `services/search-template.ts` | searchUrl 的 JS 形态与 `{{…}}` 预求值 | `resolveSearchTemplate`、`resolveJsSearchTemplate`、`preEvaluateUrlJs`、`isJsSearchUrl` |
+| `services/fetcher.ts` | 守门抓取器（唯一出站口）+ 解码链 + 出站头合并 | `createFetcher`、`decodeBody`、`fetchTextPage`、`headerOf`、`Fetcher`、`FetchedPage` |
+| `services/engine-fetch.ts` | `@js` 里 `java.ajax` 的守门出口 | `engineFetch` |
+| `services/bridge.ts` | 引擎↔服务桥：值规约、条目提取、源级求值上下文 | `firstValue`、`listValue`、`extractItems`、`engineContextOf`、`makeSubEval`、`Page`、`SubRuleEval` |
+| `services/pagination.ts` | 翻页三闸（回环 / 零新增 / 上限 + 串章） | `followPages`、`FollowResult` |
+| `services/chapter-page.ts` | 章节分页判定（防串章闸判据） | `isSameChapterPage`、`stripExtension` |
+| `services/content.ts` | 正文取值收口（HTML → 纯文本，幂等） | `contentToText`、`htmlToText`、`looksLikeHtml` |
+| `services/localbooks.ts` | 本地 TXT 书库：解码 / 切章 / 偏移切片 / 内存 LRU / 删除 | `LocalBooks`、`decodeLocalText`、`splitChapters`、`isLocalBookKey`、`ChapterSpan` |
+| `services/shelf.ts` | 书架：元数据写口（add = patch 语义 / update = 补丁）+ 进度 | `Shelf`、`AddBookInput`、`BookPatch` |
+| `services/cache.ts` | 目录 / 正文文件缓存 + LRU 淘汰 | `PageCache`、`safeKey` |
+| `services/storage.ts` | 数据根、原子写与并发串行、读 JSON 的损坏判别、防抖写 | `novelDir`、`readJson`、`writeJsonAtomic`、`writeFileAtomic`、`createDebouncedWriter`、`CorruptJsonError` |
+| `services/errors.ts` | 错误类与**分类学单点** | `classify`、`ErrorCategory`、`SourceNotFoundError`、`ChapterNotFoundError`、`RuleMissingError`、`FetchError`、`DecodeError`、`LocalNotMountedError` |
+| `services/probe.ts` | 探针：真发一次搜索请求（关键词逐词重试） | `probeSource` |
+| `services/export.ts` | 整本导出核心：串行 + 节流 + 失败即停 + abort 即停 | `exportBook`、`ExportDeps`、`ExportOptions` |
+| `services/proxy.ts` | 出站代理判定（config > 环境变量 > Windows 系统代理 > 直连） | `resolveProxyUrl`、`proxyFromEnv`、`normalizeProxyServer`、`readSystemProxy` |
+| `services/types.ts` | 持久化模型（sources.json 形状） | `NovelSource`、`NormalizedRules`、`SourceAuth`；`SourceStatus` / `SourceContentKind` / `ShelfBook` / `ShelfProgress` 反向 re-export `shared/wire.ts` |
+| `services/url.ts` | URL 绝对化（拆 request↔bridge 环的纯工具） | `absUrl` |
+| `api/dispatch.ts` | `/novel-api` 前缀路由内部分发 | `createApiHandler`、`ApiHandlerOptions` |
+| `api/wire.ts` | 同源 fence / body 读取 / 信封写出 / 错误→HTTP 映射 | `isTrustedRequest`、`readJsonBody`、`writeOk`、`writeError`、`errorStatusOf`、`ApiError` |
+| `shared/wire.ts` | **跨半契约**：值形状、路由常量、query/body 构造器、书目字段集 | `ROUTES`、`paramRoutes`、`SEG`、`PARAMS`、`queries`、`shelfBody`、`SHELF_META`、`pickShelfMeta`、`LOCAL_SOURCE_ID`、`NOVEL_API_PREFIX`、全部 DTO |
+| `tools/tools.ts` | agent 五工具（与 HTTP 共用 service 层） | `buildTools`、`registerTools` |
+| `tools/project.ts` | 缺键投影唯一实现 | `project` |
+
+## 关键口径与不变量
+
+### 1. 源入库（`services/intake.ts`）——入库规则的唯一实现
+
+`SourceIntake.intake(raw)` 是「书源进入系统」的全部语义，顺序钉死：**normalize → 批内留首条 → 按址去重 → add / replace**。两条调用路——后台导入任务（`import-job.runImport`）与工具面同步导入（`reading.importSource/importOne`）——都只是**调用方**，只把 `IntakeDecision` 映射成自己的词汇（任务 counts/issues、工具 `ImportOutcome`）。
+
+- 批的边界 = 一个 `SourceIntake` 实例的生命周期：构造时冻结库内地址快照（`byKey`，O(1) 查重），批内新落键实时并入；`batchKeys` 与库内已有键**分列**，两种去重语义不混用。
+- **被否决的方案**：规则只住在 `runImport` 里（历史形态）。后果是同址可重复入库——同步工具面导入没有去重，入库规则只兑现了一半。
+- 去重键 `dedupKey` = `trim` + 去尾部 `/`，**不改大小写**（legado 地址区分路径大小写，魔改会误判）。
+
+### 2. 可/不可用源的去重差异（`intake.intake`）
+
+同一 baseUrl 已有条目时：
+
+- 已有条目里**存在 verified** → 保留已有、跳过新条，`skipped{reason:'verified'}`。取 `existing.find(verified) ?? existing[0]`——不能让一条历史脏的 unverified 条目把可用源挤掉。**verified 跳过同样占批内键**（与旧任务口径一致，后续同址条目一律 batch 跳过）。
+- **无可用的**（全 broken / unverified）→ 新条 `tx.replace(preferred.id, result)` **复用旧 id**（书架与既有引用不断），并 `tx.removeAll(rest)` 清掉同键其余条目。历史脏数据在此收敛成一条。
+- 缺地址的条目（normalize 失败）不参与去重，按 missing 口径逐条报。
+
+`replace` 的语义在注册表侧：原位 splice 保列表序、`status` 复位 `unverified`、`importedAt` 更新为现在——**新规则需重验**，且只收 `ok:true` 的 normalize 产物（与 `add` 同口径）。
+
+### 3. 书源注册表是原子事务，落盘不是调用方的纪律（`services/sources.ts`）
+
+`SourceRegistry` 对外只有 `edit(recipe)` / `flush()` / `list()` / `get()` / `toPublic()`。原 7 个公开 mutator 与公开 `persist()` **全部删除**——「改了忘落盘」在 interface 上不可表达。recipe 同步执行，故一次 `edit` 内的多步变更对外不可分割（并发 edit 不交错）。
+
+落盘策略住在 module 内部，调用方不知道粒度存在：累计 ≥20 次变更的那次 `edit` **等写落地**，否则 100ms 尾沿防抖后台合并；任务收尾与测试断言用 `flush()`。**被否决的方案**：9 处调用点手工配对「mutator + persist」（注释里的顺序约束），加上住在任务运行器里的 `IMPORT_PERSIST_EVERY` / `PROBE_PERSIST_EVERY` 两个节流常量——谁忘了 persist 就是静默丢数据。
+
+`load()` 承担**存量归一**并在改动时立即落盘收敛：`enabled` 缺省 → true（早期数据无此字段，缺省即启用，否则搜索面 `s.enabled &&` 会静默排除老源）；`type` 缺省 → `'text'`；`groups` 按 `splitGroups` 拆分（逗号粘连收敛）；`name` 按 `stripLeadingIcons` 剥前缀图标。四条迁移都幂等。
+
+`list()` 返回**活体数组**（不是快照）：intake 的地址索引与 import-job 的状态判定依赖活引用。快照化读面是另一张卡的事。
+
+### 4. 后台任务是单槽，不是队列（`services/import-job.ts`）
+
+`SourceJobs` 只有一个 `current: JobState`。运行中再提交（任意 kind）→ `JobRunningError` → 路由 409 `JobRunning`。任务结束后结果**保留在槽内**直到下一个任务开始——关设置页、刷新浏览器后重挂载查一次 `job-status` 就能恢复展示。
+
+- 任务态**只在内存**：DSH 重启即丢（`status()` 返回 null，UI 回落空闲态）；但源已按批落盘，导入本身幂等可重跑，故不做任务持久化。
+- 导入管线：逐文件 `JSON.parse(stripBom(text))`，坏文件记 `fileErrors` 继续，其余照常；`Array.isArray` 摊平后逐条交 `SourceIntake`。**导入不探针**——新源一律 `unverified`，验证归批量验证任务（并发 5 路，对齐 `searchParallel` 的限流敬畏）。
+- `issues` 截断 200 条（内存不膨胀），**计数字段不受截断影响**。
+- 批量验证的 worker 每条**重查注册表**：任务运行期间源可能被删，取不到就点名跳过，不产生 `TypeError` 垃圾失败。
+- 跳过 642 条源的逐条同步探针是本设计的出发点：原链路每条 persist 全量重写 sources.json + 逐条串行网络请求，每 20 条要等几十秒。
+
+### 5. 请求组装（`services/request.ts`）——选项语义的唯一主人
+
+`assembleRequest(template, vars, baseUrl, opts)` → `RequestPlan`。这里一次性解释完：
+
+- **切分**：`,{`（允许逗号两侧空白——legado `paramPattern` 是 `\s*,\s*(?=\{)`；真实源大量写 `, {...}`，此前不许空格会把选项串并进 URL，POST/charset 选项成片失效）。选项 JSON 严格优先，失败回退单引号交换（`{'a':'b'}` 真实源大量存在）；`headers` 支持字符串双重编码。
+- **选项解析不了 → 整串当纯 URL**（诚实失败于请求层，不半途猜结构），但 **`console.warn` 留痕**——静默改语义（GET 打向含 `,{...}` 的地址）极难排障。
+- **method 判定**：`(option.method ?? 'GET').toUpperCase() === 'POST'` 才 POST，其余一律 GET。
+- **body 插值**：`option.body` 同样过 `interpolateUrl`。
+- **POST 表单默认头**：有 body 且 headers 里没有（任意大小写）`content-type` → 补 `application/x-www-form-urlencoded`。不补的话 Node fetch 发 `text/plain`，PHP 类表单端点 `$_POST` 解析不到字段（帝国 CMS 搜索收空关键词返回空页）。
+- **charset** 进计划，解码优先级高于 Content-Type 与嗅探。
+- **相对 URL 按 baseUrl 绝对化**；`baseUrl = null` 不做绝对化（`@js` 的 `java.ajax` 形态：URL 由脚本自己拼好）。
+- **`trimFirstPage`**：Native 分页语义——模板以 `/{{page}}` 结尾且首页 → 裁掉页码段（带 `/1` 的站点直接 404）。
+
+`fetchInitOf(plan, baseHeaders)` 是 init 姿态单点：GET **不带 method 键**（fetch 缺省即 GET）；POST 带 method 与插值后的 body；`baseHeaders`（如源级 `headerOf`）打底、计划 headers 覆盖同名。**被否决的方案**：`buildSearchRequest` 与 `engineFetch` 各写一份、靠「与对方同口径」注释同步。
+
+`stripUrlOption(href)` 剥章节 / 下一页 URL 尾部的 `,{"webView":true}` 选项后缀（legado 嗅探语义）：只认「逗号 + 完整 JSON 对象收尾」，正文里的 `{a,b}` 不误剥。本插件不支持 WebView——剥掉后缀让普通请求照常尝试，而不是 URL 解析必炸。
+
+### 6. 守门 fetcher（`services/fetcher.ts`）——唯一出站口
+
+`createFetcher` 收口三件事：超时（`AbortController` + `Promise.race`，缺省 15000ms，可按次覆盖）、网络层异常、HTTP 非 2xx——分别类型化为 `FetchError`，**绝不把未分类异常漏给上层**。
+
+- **缺省请求头**带浏览器 UA / Accept / Accept-Language：Node fetch 默认不带 UA，站点 WAF 按 UA 过滤直接 403（实测 26 源）。调用方显式声明的同名头优先。
+- **代理**走 undici 的 `ProxyAgent`（`dispatcher`）：Node 的 fetch **不读系统代理**，有代理才通的站点直连会被 302 / 重置——「浏览器能开、读者打不开」的类型错位由此而来。判定优先级见 `services/proxy.ts`。
+- **解码链**（`decodeBody`，禁默认 UTF-8 硬解）：⓪ 声明覆盖（searchUrl 选项 charset）→ ① Content-Type charset → ② 缺位且内容（去 BOM/前导空白后）以 `<!doctype`/`<html`/`<head`/`<?xml` 开头 → 前 1024 字节 latin1 嗅探 `<meta charset>` / `<meta content=…charset=…>` → ③ 兜底 UTF-8。**声明的 charset iconv 不认识 → `DecodeError`**（宁可报「这页编码解不出」，不拿乱码冒充正文）；空串 charset 声明视为缺位（真实源存在 `charset=` 空值），不炸。
+- `fetchTextPage(fetcher, url, init, declaredCharset)` 是「抓取 + 解码 + 落地地址」的单点，超时归 fetcher 自身（**被否决的方案**：`fetchTimed` 在 fetcher 之外再竞速一个**不 abort** 的定时器，两套超时并存、错误文案却一字不差）。
+- `headerOf(source)`：源静态 `rules.header` 打底 → 非 expired 的 `auth.headers` 覆盖同名 → Cookie 段合并（静态段按名去重、auth 名占优并在后）。
+
+### 7. 搜索面（`services/search-face.ts`）——探针与聚合搜索共用一条请求语义
+
+`fetchSearchPage(source, keyword, fetcher, timeoutMs)` 是「发一次书源搜索请求并取回条目」的唯一实现，page 固定 1（搜索面无翻页）：规则缺失判定 → `resolveSearchTemplate`（`@js:`/`<js>` 沙箱求值 + `{{…}}` 按 JS 预求值，纯变量占位原样留给 `interpolateUrl`）→ `assembleRequest`（Native 时 `trimFirstPage`）→ `fetchTextPage` → 列表规则求值 → `extractItems`。返回 `landedUrl`（跟随重定向后的 finalUrl）——**规则求值与相对链接一律以落地地址为基准**，与目录 / 正文面同口径（重定向站点不再错位）。
+
+错误策略：抓取 / 解码 / 沙箱错误**上抛**（调用方各自 catch，用 `searchErrorCodeOf` 归类）；**规则缺失是结果**（`{ok:false, code:'RuleMissing'}`），因为两个 adapter 都把它当正常分支而非异常。
+
+### 8. 探针（`services/probe.ts`）
+
+真发一次搜索请求，关键词按 `PROBE_KEYS = ['书','小说','的']` 逐词重试——单字「书」在个别站被搜索程序停用（实测 aijjxs 对「书」0 命中、其余词 1 命中）。**只有「请求成功但 0 命中」才换词**；网络 / 规则异常立即返回，不多打请求。`ruleBookList ≥1 条目且首条 ruleBookName 非空` → `verified`，否则 `broken` 并如实透出（引擎错误 message 已含段级定位）。
+
+**探针与搜索同一个耐心值**：`opts.timeoutMs` 缺省走 `ReadingService.searchTimeoutMs`，门面 `probe()` 显式传入。「配了 5s 就都是 5s」是既有承诺——修复前门面 `probe` 漏传，落回 fetcher 固定 15s。
+
+### 9. 缓存（`services/cache.ts`）与落盘（`services/storage.ts`）
+
+`PageCache` 把目录与正文写成 `cache/toc/<sourceId>-<safeKey>.json`、`cache/content/<sourceId>-<safeKey>-<idx>.txt`，每次 `set*` 后 `prune()`：两目录总字节超上限（缺省 200MB）→ 按 `mtimeMs` 升序删到 ≤ 上限（**LRU 近似**，不维护访问计数）。`safeKey` = `encodeURIComponent(bookKey)`；超 100 字符改前 60 字符 + `~` + sha1 前 10 位（确定性，规避文件名长度上限）。
+
+落盘只有一条低层路径 `writeFileAtomic`：tmp + rename，**并按文件名排队串行**——并发 rename 同一目标在 Windows 上会 EPERM（实测 642 源并发导入时 25 次炸在 sources.json rename）。`writeJsonAtomic` 与 `PageCache` 共用它（历史分叉：PageCache 曾自抄一份无排队的 writeAtomic，阅读 + 导出并发抓同章实测 30/80 EPERM→500）。入队必须先于任何 `await`（含 mkdir），否则「最后写的最后落盘」不成立。
+
+`readJson` 严格区分两种「读不到」：**ENOENT → fallback**（首启无 sources.json / shelf.json 是常态）；**存在但解析失败 → 备份 `.bak` + 日志 + 抛 `CorruptJsonError`**。绝不折叠成 fallback——那会让下一次 `edit` 用空表覆盖整文件，642 条源无告警消失。
+
+### 10. 书架与书目字段集（`services/shelf.ts` + `shared/wire.ts`）
+
+`shelf.json` 常驻内存镜像，写盘走 `createDebouncedWriter(100)` 防抖（进度高频更新只落最后一次）。
+
+**书目元数据字段集的唯一主人是 `shared/wire.ts` 的 `SHELF_META` 表 + `pickShelfMeta`**：7 个字段（`sourceId`/`title`/`author`/`coverUrl`/`intro`/`lastChapterName`/`totalChapters`）的「名称 × 类型判别 × 归一化」只准活在这张表里。三个消费方都从它派生——`Shelf.applyPatch` 遍历表做保值覆盖、`shelfBody`（客户端 body 构造）走 `pickShelfMeta` 整理形状、`dispatch.shelfPut` 把未知 JSON body 归一化。**加一个书目字段 = 只改这张表**（`Shelf` 与 dispatch 零改动）。**被否决的方案**：逐字段 `typeof` 筛键的各处抄本。
+
+- `bookKey`（身份）与 `progress` / `addedAt`（系统字段）不属于元数据写口，**不进表**。
+- `pickShelfMeta` 的口径：类型不符 / null / undefined / 未知键一律缺席；`totalChapters` 取 `Math.max(0, Math.floor(v))`，非有限数缺席；**空串保留**——「title 非空才加书」的分叉判别归调用方（`dispatch.shelfPut`）。
+- 两种元数据写口：`add` = 不在架才插入、已在架即 **patch 语义**；`update` = 对在架书打补丁、不在架返回 `null`（不静默造书）。两者共用 `applyPatch`：**缺席 / 空值键跳过（保值），带值键覆盖**——新书构造也走同一函数，可选元数据缺席不落键。**被否决的方案**：`{...existing, ...input}` 展开——`: undefined` 的自有键会抹掉已有元数据。
+
+### 11. 规范值与缺键投影（`tools/project.ts`）
+
+**wire 口径**：空值字段一律 `| null`（JSON 里 null 是在场的值），只有「可能整键缺席」的字段（时间戳、`statusDetail` 之类）保持 `?:`（`JSON.stringify` 会丢 undefined 键）。**这不是工具面的口径**。
+
+**工具面口径**：`project()` 把规范值里 `null` / `undefined` 的字段**整键省略**（数组逐项、对象递归、原值不动，纯投影不改输入）。理由是 harness 对工具输出做 lossless-JSON 校验，`undefined` 属性值一票否决（整个工具调用报 "value is not lossless JSON"，真实结果被吞掉）。**这是 harness 约束下的职责，不是 wire 口径**——此前五个工具的 `execute` 各自手抹六处，纪律靠抄。
+
+代价如实记录：投影**改变类型**（可空字段变为缺席），故出参类型由调用方断言；schema 侧一致性由 `tests/tools/schema-contract.test.ts` 钉住（execute 输出过 harness 同款校验）。但**注意这条钉子的成色**：schema 属性集只有 **shelf 那一条**是从 `SHELF_META` 表真派生出来的（`schema-contract.test.ts` 的「这一条**从 wire 的 SHELF_META 表派生**」用例），其余四份是**手抄快照**——wire 改名时它们不会自动报错，需人工同步（机构上无法从擦除后的 TS 类型反推）。
+
+### 12. 本地书身份 `__local__`（`services/localbooks.ts` + `shared/wire.ts`）
+
+`LOCAL_SOURCE_ID = '__local__'` 的**唯一主人是 `shared/wire.ts`**（跨半契约常量）：client 半与测试直接 import，服务半 re-export 保留既有路径——**不再有第二份声明**。为什么服务半可以有第二份而这里不许：client 纯度门拦不住服务半（`services/types.ts`、`reading.ts` 本就在引 shared），所以服务端那份从来不是构建约束逼出来的。
+
+- bookKey 形态 `local:<uuid>`，`BOOK_KEY_RE` 严格 uuid 校验**兼防路径穿越**。
+- 本地解码链与 fetcher 不同（`decodeLocalText`）：BOM 优先 → **UTF-8 `fatal:true` 严格探测** → GBK 回退。不复用 `fetcher.decodeBody`——它的兜底是 UTF-8，GBK 文件会乱码；本地文件也没有 Content-Type。`Buffer.toString('utf8')` 会把非法字节静默换成 U+FFFD，故必须用 fatal TextDecoder。
+- 原文落盘（重解码路径保留）+ 元数据 JSON（含章节字符偏移表 `ChapterSpan[]`）；读取按偏移切片，**解码全文内存 LRU 上限 3 本**（Map 迭代序即 LRU 序）。退化 span（相邻标题行 / 文末孤标题）`start > end` 时夹紧边界，保证只切出 `''` 而非负长度。
+- `__local__` 的书在门面内分流：`getToc` / `getChapter` 见 `sourceId === LOCAL_SOURCE_ID` 走本地书面、**不查注册表**；路由层零 LOCAL 知识。「删书不留孤儿文件」的 invariant 也归门面 `removeBook`（本地书连带删文件 + 删书架条目）。
+
+### 13. 整本导出（`services/export.ts` + `api/dispatch.ts`）
+
+`exportBook` 是异步生成器：BOM 开头（Windows 记事本兼容）→ 逐章 `getChapter`（**缓存优先语义即天然断点续传**）→ 每章后 `sleep(delayMs)`（N-1 次，最后一章不睡）。**限流敬畏是第一原则：绝不并行抓章**。两个停止条件都落在生成器内：单章抛错 → 输出 `[导出中断于第 k 章《名》：原因]` 后 `return`（失败即停，重跑只补缺章）；`signal.aborted` → 直接返回。
+
+路由侧：toc 为空 → 首包前走错误信封（422 `EmptyToc`）；否则发 200 + `X-Novel-Total-Chapters` 后逐块写。`res.on('close')` → abort（浏览器关页 / 取消即停抓取）。背压等待 `drain` **前先查死连接**——destroyed 的响应不会再发 `drain`，挂等会吞掉断连取消。200 头已发后异常**不能走 `writeError`**（二次 writeHead 报 `ERR_HTTP_HEADERS_SENT`），就地补中断标记。
+
+### 14. wire 契约（`shared/wire.ts`）
+
+**21 条路由**（16 条静态 `ROUTES` + 5 条参数 `paramRoutes`），**计数由 `tests/shared/wire-builders.test.ts` 钉死**——此前的「17 条路由」注释既腐烂又无测试。`route(...segs)` 同时给出 `path`（客户端 fetch 用）与 `segs`（服务端段匹配与一致性测试用），同一构造保证一致。`SEG` 是路由段的唯一字面量来源，`PARAMS` 是 query 参数名的唯一字面量来源（此前参数名散在 dispatch 与四个 client 文件里各写一份，改名无处编译报错；`SearchView` 曾手拼 `shelf/${...}` 绕过 `paramRoutes`——活漂移）。
+
+**统一信封**：成功 `{ ok: true, value }`，失败 `{ ok: false, error: { code, message, segment? } }`。`segment = { facet, segmentIndex, segmentRaw }` 是**段级定位**——错误定位到出错的规则段，而不是产出错误的结果。
+
+**错误→HTTP 两分法**（不是「状态映射只许一处」）：
+
+1. **domain / 引擎错误**：类 → `ErrorCategory`（`services/errors.classify` 单点）→ `STATUS_OF` 表 → 状态码 / 错误码。引擎三类与抓取两类用 `e.name` 当 wire 错误码；`RuleMissing` 在 HTTP 面与搜索面 / 探针是同一词汇。
+2. **路由层自检错误**：`ApiError(message, status, code)` **自带 status/code、不进分类学**，直通（405 方法不允许、404 未知路由、400 body 校验、403 非受信来源、400 非法百分号编码……）。
+
+分类权在**类型**上，不在中文文案上（`message.startsWith('源不存在')` 是历史形态：改错别字即改 HTTP 状态码）。路由侧不允许再 inline `writeJson(res, <状态码>, …)`——那会成为第三面。
+
+**同源校验**（`api/wire.ts` 的 `isTrustedRequest`）：只放行 loopback 且（无 referer 或 referer 与 host 同源）且（无 origin 或 origin 与 host 同源）的请求。**无 referer / 无 origin 放行**是本机工具与 curl 的承诺；看 `Origin` 而不只看 `Referer` 的理由：恶意页可以 `<meta name="referrer" content="no-referrer">` 让 Referer 缺席，但浏览器对跨源 POST **总是**发 Origin——「Origin 存在且跨源」必须拒，否则 `content-type: text/plain` 的 simple POST（不触发 preflight）可 CSRF 打 import / batch / auth。
+
+`readJsonBody` 的钉死：空 body → fallback；超限 → **413 只 throw 不 destroy**（destroy 会断 PassThrough 流）。`/sources/import` 单独把上限放到 32MB——真实 legado 多源导出常见数 MB（实测用户文件 4.8MB/642 源），默认 1MB 会把最大流量的包挡在门外。
+
+## 数据流与时序
+
+```
+浏览器 / agent 工具
+   │  queries.* / shelfBody.*（构造器归 wire，参数名与字段取舍同源）
+   ▼
+HTTP: POST/GET /novel-api/**         工具: novel_* → project() 缺键投影
+   │  isTrustedRequest → readJsonBody → 段匹配（SEG / paramRoutes）
+   ▼
+api/dispatch.ts  ── 只做「传输关注点」：方法守卫、body 形状校验、信封、导出节流
+   │  （业务判据一律抛给门面：本地书分流、loginUrl 形态、任务互斥、启停 invariant）
+   ▼
+services/reading.ts（ReadingService）── 唯一业务入口，部件装配后即 private
+   ├─ SourceRegistry（edit 原子变更 + 内部合并落盘）
+   ├─ SourceIntake ── normalizeSource（三方言 → NormalizedRules）
+   ├─ SourceJobs（单任务槽）── probeSource ── fetchSearchPage
+   ├─ Shelf（SHELF_META 派生的保值补丁）+ PageCache（LRU）
+   ├─ LocalBooks（偏移表 + 解码 LRU）
+   └─ Fetcher（唯一出站口：超时 / 代理 / UA / 解码链）
+        ▲
+        └─ engineContextOf / makeSubEval ── engine evaluate（段级错误追踪、@js 沙箱）
+```
+
+- **搜索**：`search(keyword, {sourceIds})` 过滤 `enabled` 源（`[]` = 未限定 = 搜全部启用源）→ 按 `searchParallel` 分批 `Promise.all` → 每源独立 `searchOne`（catch 后只写该组 `error`，单源失败不拖垮整批）。`searchPlan()` 是同一参与集判定的唯一主人——客户端分批与进度条按它走，不再自行重推导启停 invariant。
+- **阅读**：`getToc` 缓存优先（`refresh` 跳过）+ **in-flight 去重**（同书并发只拉一次，`tocInflight`）；`getChapter` 缓存优先 + 目录越界守卫（双边：负数与超长都拦，HTTP 面有 `^\d+$`、工具面无下限，守门必须盖住两面入口）+ 多页串接 + Miss 抛 `RuleEvalError` 不吞。
+- **目录 / 正文的翻页**：`followOrSingle` 在 next 规则为 `null` 时短路单页（无翻页发现能力），否则走 `followPages` 三闸——回环闸（出现重复条目即判到底，软 404 防御）、零新增闸（空页不追 next）、上限闸（`tocMaxPages` 200 / `contentMaxPages` 50）。正文面额外带**串章闸**：末页「下一页」常指向下一章（笔趣阁 `.prenext`），`isSameChapterPage` 判不准时宁漏页不串章。
+- **零命中不得静默**：正文规则取到空文本 → 抛 `RuleEvalError` 并带落点（请求地址 → 实际落地地址，两者不同即说明被跳转走了），**不写缓存**；缓存读取时空正文一律当未命中（旧版曾把站点跳转落地页的零命中写成 0 字节缓存，27 章全空到无感）。目录 / 正文规则缺失同样不降级 `?? ''`（空串规则会把整页文本当正文），宁炸不猜。
+- **值规约（服务层侧）**：引擎的 `EngineValue` 到服务层字符串只有两个出口——`firstValue`（单值：miss→null、value→text、list→`join('\n')`、matches→每行首列）与 `extractItems`（列表页条目：nodes→逐节点 HTML 片段、list→逐项、matches→行 `join('\t')`、miss→`[]`）。`nodes` 落到单值出口是错误而非数据，抛带 facet 与节点数的 `RuleEvalError`（`segmentIndex = -1` 表示服务层规约层，不是规则某一段）。空态裁决口径见 `CONTEXT.md`「取值规约」（取位失败 → Miss；解析到空集合 → 空 List），唯一实现在 `engine/select.ts` 的 `reducePicked`——服务层不复制这套判定，只消费结果。
+
+### 工具面与 HTTP 面共用 service 层的证据（不存在第二套实现）
+
+- `tools/tools.ts` 只 `import type { ReadingService }`，全部 `execute` 都是 `service.search / getToc / getChapter / importSource / probe / shelfList` 的调用 —— 没有任何一处自己发 fetch、自己读 `sources.json` / `shelf.json`，也没有第二份规则求值。
+- 探针的耐心值、入库规则（`SourceIntake`）、越界判定（`ChapterNotFoundError`）都在服务层单点：工具面 `novel_read_chapter` 只调 `getToc` + `getChapter`，越界报错由服务层抛；`novel_add_source` 只做「JSON 文本 → `importSource` → `project`」。
+- 唯一由工具面**自己**拥有的语义是「缺键投影」（`tools/project.ts`）与各工具的 render 文本投影——因为它是 harness 输出 schema 的约束，不是业务语义。规范值（`service` 返回的完整 JSON）在投影前不被裁剪，render 只是规范值的文本投影。
+- 反向验证：`tests/api/routes.test.ts` 断言 `SEG` 每一段都被某条路由用到（无孤儿段、无手抄段）。而工具 schema 侧的对应断言**只有五分之一是真绑**（见 §11）——`schema-contract.test.ts` 里除 shelf 外都是手抄快照。
+
+## 构建、装载与验收
+
+**`lib/` 是构建产物且不入库**（`package.json` 的 `files` 只含 `lib` / `cordis.patch.yml` / README / LICENSE；`main` 指向 `lib/index.js`）。构建是 `tsdown` 双配置（`tsdown.config.ts`）：host 半 ESM + dts，client 半 CJS 单文件闭合工厂（`window.__ModuleLoader__.load({ id: '@xrn1997/dsh-novel', factory: … })` 三段式 banner/intro/footer）。client 半带**构建期纯度门**：Node 内建与平台模块表之外的 `@deepseek-ai/*` 值 import 一律构建失败——这也是 `shared/wire.ts` 必须零运行时依赖、只许 type-only 依赖的原因（client 半会把整个文件 inline 进 bundle）。
+
+缺失 `lib/` 的报错形态：`dsh: plugin tree failed to load` + `ERR_MODULE_NOT_FOUND` 指向 `lib/index.js`——**整个插件树拒绝挂载（`dsh web` 直接启动失败），不是静默降级**。
+
+三种安装路径的差异必须记住：
+
+- **npm 安装**（`dsh plugin add @xrn1997/dsh-novel`）走预构建产物，秒装、无需构建授权。
+- **GitHub 源码安装**（`add github:xrn1997/dsh-novel`）由 `prepare` 脚本（= `tsdown`）自动构建；pnpm ≥10 首次安装可能报构建脚本被拦截（依赖已装但 `lib/` 未生成），需先在 profile 目录 `pnpm approve-builds --all` 再重跑安装命令。
+- **本地目录 / `link:` 安装**（`add link:<path>`）**pnpm 只建目录链接、绝不在对端跑 `prepare`**——必须在源码目录手动 `pnpm build` 一次，否则 `dsh web` 起不来。
+
+**`pnpm test`（常规集）覆盖什么**：引擎规则求值、服务层语义、API 路由与信封、工具 schema 契约、Cordis 入口、前端逻辑与 smoke（`vitest.config.ts` 排除 `tests/compat/**` 与 `tests/packaging-build.test.ts`）。**不覆盖什么**：任何真实站点可用性、真实安装链路、构建产物自检——它只用注入的假 fetch 与合成 HTML。
+
+**三条默认关闭的真链路门控**（`describe.skipIf`）各自的承诺边界：
+
+| 门控 | 跑法 | 承诺边界 |
+| --- | --- | --- |
+| `DSH_REPROBE=1` | `pnpm vitest run tests/reprobe.test.ts` | 对 `sources.json` 全量真发搜索请求，得出**当前网络 + 当前源集**的 verified 率与失败分布。真实访问网络、数分钟量级；结论随时间与代理环境漂移，不是回归断言。 |
+| `COMPAT_CAPTURE=1` | `pnpm vitest run --config vitest.compat.config.ts tests/compat/capture.test.ts` | 把真实站点抓成 fixture 快照（脱敏两刀后落盘）。采集与回放**必须同关键词**（manifest 已记）；GBK 源 v1 直接失败（fixture 只存 utf8 原文，不静默转码）。 |
+| `DSH_INSTALL_CHECK=1` | `pnpm vitest run tests/packaging-install.test.ts` | 真跑 `dsh plugin add`（一次性 profile `novel-smoke`）→ 断言 bundles 挂载 + `lib/client.js` / `cordis.patch.yml` 就位 → remove。测试自己先 `pnpm build`，忠实复现「源码目录装入」流程。 |
+
+`pnpm test` 全绿 = 引擎 / 服务 / 契约 / 前端逻辑成立，**不等于**任何真实站点可用，也不等于安装链路成立。
+
+**compat 回放的分母口径**：`compat/report.md` 的「跑通率」分母是 `compat/fixtures/` 下的 fixture，当前树只有 1 条手写合成 fixture（`demo-site`，域名 `demo.local` 不存在）——它是**规则引擎离线回放的回归基线**，**不代表任何真实站点兼容率**（不覆盖真实 HTTP / 重定向 / GBK / 超时 / 反爬 / `@js` 真实宿主）。`compat/sources/` 目前为空；站点可用率请用真机重探（`DSH_REPROBE=1`）或投放真实源后走「投放 → 采集 → 复算」三步闭环。
+
+**验收口径（原 v1 设计文档 §4.6 的条款；那份文档已出库，此条仍成立）**：**compat 回放跑通率是 v1 的验收标准本身**——本目录把「率」变成可一键复算的数字。与之并列的两条：常规门禁 `pnpm test` + `pnpm typecheck` 全绿，以及真安装链路 `DSH_INSTALL_CHECK=1` 通过（DoD#1 属**人工验收**，自动化对应物就是这条门控）。注意验收标准是「率可复算 + 分母口径讲清」，不是「率等于 100%」——当前分母只有合成 fixture，真实站点兼容率需要投放真实源才能谈。
+
+## 测试钉子短表
+
+| 测试文件 | 钉死什么 |
+| --- | --- |
+| `tests/shared/wire-builders.test.ts` | 路由计数 16 + 5、`LOCAL_SOURCE_ID` 持久化值与跨半同源、`encodeQuery` / `queries` / `shelfBody` 的参数名与字段取舍、`SHELF_META` 键集、`pickShelfMeta` 判别与归一化、shelf 路径必须走 `paramRoutes.shelfKey` |
+| `tests/api/routes.test.ts` | `ROUTES` → 真实 dispatch 落点逐条；405 / 404 / 400 三态；local part 缺席 → 503；`SEG` 无孤儿段 |
+| `tests/api/wire.test.ts` | 同源 fence 四态；`readJsonBody` 的 400 / 413；`errorStatusOf` 全类目映射与 segment |
+| `tests/api/dispatch-sources.test.ts` | 导入任务 → jobId → job-status → done；结果保留；409 JobRunning；旧同步路由 405；body 校验；大包不 413 |
+| `tests/api/dispatch-reading.test.ts` | search / book / toc / chapter 落点与 400；shelf 三形态 PUT 与 `patch` 单字段回写；`sourceId` 必填；progress 值域 |
+| `tests/api/dispatch-local.test.ts` | 本地导入自动加书架（`sourceId=__local__`）、GBK 回显、400 / 413、删书连带删文件 |
+| `tests/api/dispatch-export.test.ts` | 流式头（BOM / Content-Disposition / X-Novel-Total-Chapters）与两章正文；toc 失败走错误信封（非流） |
+| `tests/services/intake.test.ts` | 入库四裁决（added / replaced / skipped×2）与替换复用 id、清同键残留、`dedupKey` 口径 |
+| `tests/services/sources.test.ts` | `edit` 原子性与合并落盘（不 flush 磁盘未写、20 次阈值强制落盘、并发 edit 不交错、recipe 抛错仍标脏）；`toPublic` 凭据红线；load 四条存量归一 |
+| `tests/services/import-job.test.ts` | 单槽互斥与结果保留、issues 截断 200、坏文件不拖垮、导入不探针、批量验证并发 ≤5 与运行中删源 |
+| `tests/services/reading.test.ts` | 搜索分组与空数组语义、重定向按落地地址、目录两页三闸与缓存、正文规约与零命中报错不写缓存、ruleDetail* 回退、`__local__` 分流、防孤儿删书、探针同耐心 |
+| `tests/services/probe.test.ts` | 逐词重试与 broken 口径、规则缺失是结果、charset 解不出 `DecodeError`、超时覆盖 |
+| `tests/services/search-face.test.ts` | 条目提取 + landedUrl、规则缺失结果形态、按次超时、POST 选项透传、错误码投影 |
+| `tests/services/request.test.ts` | 选项切分（含逗号空格、单引号 JSON、双重编码 headers）、POST 表单默认头、charset 透传、相对 URL 绝对化、`trimFirstPage`、`stripUrlOption`、`@js` 模板三形态 |
+| `tests/services/fetcher.test.ts` | 非 2xx / 网络 / 超时 → `FetchError`；代理 dispatcher 有无；缺省 UA 与调用方覆盖；解码链四优先级 + 空串声明；`headerOf` 的 Cookie 合并 |
+| `tests/services/cache.test.ts` | toc / content 往返与按章隔离、prune 按 mtime 淘汰、`safeKey` 长短形态 |
+| `tests/services/storage.test.ts` | `novelDir` 两态、原子写无 `.tmp` 残留、并发写串行、损坏文件抛 `CorruptJsonError` + `.bak`、防抖合并 |
+| `tests/services/shelf.test.ts` | add 往返与 patch 语义（缺席键保值、显式 undefined 不抹值）、progress 防抖、不在架 `null` |
+| `tests/services/localbooks.test.ts` | 解码链四态、切章正则诸形态、`local:` 形态防穿越、LRU 3 本、越界明确报错、零内容章不产生负长度 |
+| `tests/services/pagination.test.ts` | 回环 / 零新增 / 上限 / 串章四闸逐一 |
+| `tests/services/chapter-page.test.ts` | 同章后缀形态、下一章拦下、标准页码查询放行、判不准拦下 |
+| `tests/services/export.test.ts` | N-1 次节流与章格式、失败即停无后续请求、abort 零请求、toc 抛错透传 |
+| `tests/services/error-taxonomy.test.ts` | 每个错误类的类目 / HTTP / ProbeErrorCode 三投影；新类目忘进表编译期报错 |
+| `tests/services/normalize.test.ts` | 三方言映射、必填校验、warning 口径、`bookSourceType` 拒绝非文本、分组拆分与图标剥离 |
+| `tests/tools/schema-contract.test.ts` | execute 输出过 harness 同款校验；schema 在 harness 强制子集内；wire 绑定只对 shelf 成立（表派生），其余四份是手抄快照 |
+| `tests/tools/tools.test.ts` / `project.test.ts` | 五工具名与输出形状、注册与 disposer、投影的整键省略与不可变性 |
+| `tests/index.test.ts` | 插件身份与 Config schema、值域校验加载期失败、ready 后注册与 disposer 摘净、双重启用防御 |
+
+## 已知开口
+
+按「代码为准」记录与旧文档冲突处，以及需要决策的未决口径。
+
+1. **段匹配读的是 `SEG.*`，不是 `ROUTES.*.segs`**（`src/api/dispatch.ts` 的 `import { NOVEL_API_PREFIX, PARAMS, paramRoutes, pickShelfMeta, ROUTES, SEG }`，全文段匹配用 `SEG.sources` 等）。`ROUTES.*.segs` 的**生产消费者为零**，只有 `tests/api/routes.test.ts` 的用例「SEG 每一段都被某条路由使用」用它做命名空间校验。功能等价（`segs` 本就由 `SEG` 构造，路由段字面量仍单点）——但写新路由时别以为存在第二份权威。
+2. **仓库没有 CI**（无 `.github/`）：`pnpm test` / `pnpm typecheck` / 三条真链路门控全靠人记得跑，而门控默认 `describe.skipIf` 关闭。一次「只跑常规集」的提交就足以让构建产物或 compat 回放静默退化——改动抓取 / 引擎 / 打包链路时，那三条门控是**唯一**的自动化验证，别省。
+3. **旧 spec 声明 `AuthRequiredError`（「需登录」错误类），实现里不存在**——`services/errors.ts` 无此类，`classify` 无对应类目。需要维护者拍板：补「需登录未配 auth」的探测启发式，还是把声明撤下（本轮未擅自发明启发式）。
+4. **旧 spec 称探针返回「分段 trace」，实际 `ProbeResult` 无结构化 trace 字段**（只有 `error.message` 里的段级文本 + HTTP 面的 `segment`）。修法需先定探针输出形状。
+5. **`compat/sources/` 为空、分母只有 1 条合成 fixture**：真实站点兼容率**无数字支撑**，需要真实可联网站点与人工采集（`COMPAT_CAPTURE=1` + 脱敏人工过目）。验收口径已讲清是「率可复算」，但「率」目前不代表站点。
+6. **同址已 verified 的源被新导入跳过时，新条目的规则改进被丢弃**：这是「以可用者为准」的既定口径（用户拍板），不是 bug；但 UI / 工具只报 `dupSkipped`，用户若想采纳新规则需先删旧源。
+7. **工具输出 schema 与 wire 的绑定只成立五分之一**：`tests/tools/schema-contract.test.ts` 的用例「② schema 属性集 ≡ wire 类型字段集」仅对 shelf 从 `SHELF_META` 派生比对，其余四份 schema 是手抄快照——wire 字段改名不会让它们报红，只能人工同步（该测试文件头注已如实声明这条局限）。
+8. **已确认的刻意保留（不改代码）**：`services/request.ts` 的 `SearchRequest` 类型别名全仓零引用；`services/bridge.ts` 的 `listValue` 无生产消费者（唯二引用是测试当归约器）；`localbooks.ts` 的 `ChapterSpan` / `BOOK_KEY_RE` / `LocalImportResult` 只在模块内用；`reading.ts` 的 `tocUrlOf` / `normalizeChapterText` 注释自称「供测试/复用」但无测试 import；`normalize.ts` 的两张方言映射表的 `ruleBookInfo` 整块逐字相同（方言是两条独立演化线，强抽有 speculative generality 风险）。`request.ts` 的 `buildSearchRequest` 虽只是 `assembleRequest` 的薄壳，但 `search-face.ts` 的 `fetchSearchPage` 在用它，属历史名字兼容、保留。
+9. **缺省值多份复制**：`50 * 1024 * 1024`（本地导入上限）在 `index.ts` DEFAULTS、`reading.ts` 的 `create` 与 `from`、`localbooks.ts` 的 `create` 各写一份；`15000` 在 `reading.ts` 与 `fetcher.ts` 各一份；`exportDelayMs` 的 `300` 在 `index.ts` 与 `dispatch.ts` 各一份；`readJsonBody` 的 1MiB 与本地导入的手写流式上限循环是两份字节上限逻辑。生产路径始终显式传值，改错一处不会静默改变业务规则——但这类复制正是「靠注释对齐」的温床。
+10. **`tests/api/routes.test.ts` 以中文文案前缀「未知路由」为判据**（钉措辞而非结构码）：文案一改即整套误红。暂无可替代的机器可读判据——「未知路由 404」与「域 404」的错误码都是 `NotFound`。
+11. **任务态不持久化**：DSH 重启后 `job-status` 返回 null，正在跑的导入进度不可恢复（已落盘的源不丢，导入幂等可重跑）。这是 YAGNI 决策，不是缺口；但「重启后 UI 显示空闲而用户以为任务还在跑」的可能性留给下一个人判断。

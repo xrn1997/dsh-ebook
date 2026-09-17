@@ -1,0 +1,12 @@
+{
+  "bookSourceName": "demo-site",
+  "bookSourceUrl": "https://demo.local",
+  "searchUrl": "https://demo.local/search?q={{key}}",
+  "ruleBookList": "@css:.b",
+  "ruleBookName": "tag.a@text",
+  "ruleAuthor": "tag.span@text",
+  "ruleBookUrl": "tag.a@href",
+  "ruleChapterName": "tag.a@text",
+  "ruleChapterUrl": "tag.a@href",
+  "ruleContent": "@css:#content@textNodes"
+}
