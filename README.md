@@ -32,7 +32,7 @@ dsh plugin --profile web remove @xrn1997/dsh-novel
 ### 首次使用
 
 1. **导入书源**：DSH 设置 →「小说」→ 选择 .json 文件（可多选，选中即开始导入）或粘贴 legado 书源 JSON。导入是**服务端后台任务**——关掉设置页不影响导入，回来即可看到进度与汇总；同一书源地址自动去重（已有可用源则跳过，坏源/未验证源被新条替换）。
-2. **批量验证**：导入不逐条探针（新源状态为「未验证」）——源列表用「验证所选 / 验证全部未验证 / 验证全部坏源」慢速后台自测，并发 5 路限流，进度同样可见。
+2. **批量验证**：导入不逐条探针（新源状态为「未验证」）——源列表提供「验证全部未验证」快捷入口，任意集合（含坏源）走「chip 过滤 + 编辑态全选 + 验证所选」慢速后台自测，并发 5 路限流，进度同样可见。
 3. **找书读**：「小说」tab 首页搜索书名 / 作者 → 点封面进入阅读器。阅读进度自动记住。
 4. **让 AI 助手干活**：在对话里直接说「帮我找一本《XX》读第三章」「看看 XX 书源为什么坏了」。
 
@@ -42,7 +42,7 @@ dsh plugin --profile web remove @xrn1997/dsh-novel
 | --- | --- |
 | `novel_search_books` | 在已启用的书源中聚合搜索，结果逐源分组（单个源失败不影响其他源）；返回的 `url` 字段可作为其他工具的 `bookKey` |
 | `novel_read_chapter` | 获取某本书第 N 章（0 起）的正文纯文本（含章名） |
-| `novel_add_source` | 导入 legado 书源 JSON（对象或数组）；导入只做规范化 + 落盘不探针（新源状态「未验证」），逐条返回 `ok` / `missing` 结果；可用性结论用 `novel_probe_source` 获取 |
+| `novel_add_source` | 导入 legado 书源 JSON（对象或数组）；导入只做规范化 + 落盘不探针（新源状态「未验证」），逐条返回 `ok` / `missing` / `dupSkipped`（同址已有可用源，保留已有未新增）结果；可用性结论用 `novel_probe_source` 获取 |
 | `novel_probe_source` | 对已有书源实际发起一次搜索请求，返回实测结论与失败定位 |
 | `novel_shelf` | 查询书架与阅读进度（当前仅 `list`；加书 / 更新进度走阅读器 UI） |
 
@@ -68,8 +68,8 @@ dsh plugin --profile web remove @xrn1997/dsh-novel
 | --- | --- |
 | 健康检查 | `GET /novel-api` |
 | 书源 | `GET /sources`、`POST /sources/import`（后台任务，body `{files:[{name,text}]}`，上限 32MB）、`GET /sources/job-status`（任务进度/汇总）、`POST /sources/batch-probe`（批量验证后台任务）、`POST /sources/batch-enabled`（批量启停）、`POST /sources/batch-delete`、`POST /sources/:id/probe`、`POST /sources/:id/enabled`（启停）、`POST /sources/:id/auth`、`DELETE /sources/:id` |
-| 阅读 | `GET /search`、`GET /book`、`GET /toc`、`GET /chapter`（`?refresh=1` 绕过缓存） |
-| 书架 | `GET /shelf`、`PUT /shelf/:key`（带 `title` 加书 / 带 `progress` 更新进度）、`DELETE /shelf/:key` |
+| 阅读 | `GET /search`、`GET /search/plan`（本次聚合搜索的参搜源集——参与集的唯一主人在服务端）、`GET /book`、`GET /toc`、`GET /chapter`（`?refresh=1` 绕过缓存） |
+| 书架 | `GET /shelf`、`PUT /shelf/:key`（带 `title` 加书 / 带 `progress` 更新进度 / 带 `patch` 对在架书改元数据）、`DELETE /shelf/:key` |
 | 导出 | `GET /export`（流式 TXT，响应头 `X-Novel-Total-Chapters` 为总章数，连接断开即停止抓取） |
 | 本地书 | `POST /local/import?name=…`、`DELETE /local?id=…` |
 
