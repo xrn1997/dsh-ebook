@@ -88,9 +88,14 @@ describe('evaluate 总装（引擎语义复查）', () => {
       ['/c/2.html', '第二章'],
     ])
   })
-  it('不认识的语法必炸：jsonpath/allinone 非分支首位 → UnsupportedRuleError', async () => {
+  it('jsonpath 中链：节点集上游如实求值错；Value 上游按 JSON 求值（上游修复后 legado 语义）', async () => {
+    // 节点集不是 JSON → 求值期如实 RuleEvalError（此前在解析期以「非分支首位」预拒——
+    // legado fork 对 JS 返回对象不分发 Mode 的快捷路径是上游已修复的 bug，TS 按修复后语义走）
     await expect(evaluate('@css:.name@json:$..x', { html: searchHtml, json: {} }, 'search'))
-      .rejects.toThrow(/首位/)
+      .rejects.toThrow(/无法按 JSON 求值/)
+    // 「js 返回对象再取字段」形态现在合法：<js> 产出 JSON 文本 → 中链 jsonpath 按 JSON 求值
+    const v = await evaluate('<js>JSON.stringify({a:{b:7}})</js>$.a.b', { html: '' }, 'search')
+    expect(v).toEqual({ kind: 'value', text: '7' })
   })
   it('选择段接在取值结果上 → RuleEvalError（不是节点集）', async () => {
     await expect(evaluate('@css:.name@text@css:.x', { html: searchHtml }, 'search'))

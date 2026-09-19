@@ -49,6 +49,7 @@ describe('JavaBridge 协议表（表驱动登记）', () => {
       ...SANDBOX_MOUNTS.javaSync,
       ...SANDBOX_MOUNTS.cookie.map((p) => p.name),
       ...SANDBOX_MOUNTS.source.map((p) => p.name),
+      ...SANDBOX_MOUNTS.cache.map((p) => p.name),
     ]
     // async 行（当前仅 ajax）在引导层手工挂特制包装，不进 sync 清单——差集必须恰为 async 集
     const asyncRows = JAVA_PROTOCOL.flatMap((r) => (r.mode === 'async' ? [r.name] : []))

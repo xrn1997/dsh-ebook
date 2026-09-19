@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import { RunCard } from '../../src/client/views/bits.js'
+import { NOVEL_CSS } from '../../src/client/styles.js'
 import { ProbeRunCard } from '../../src/client/views/SettingsSourceList.js'
 import { ImportRunCard } from '../../src/client/views/SettingsImportPane.js'
 import type { JobState } from '../../src/client/views/types.js'
@@ -11,6 +12,8 @@ import type { JobState } from '../../src/client/views/types.js'
  * （SettingsImportPane）此前近逐字同构——外框浮层、progress bar、counts 尾行、「可以关掉
  * 设置页，任务在服务端继续」文案全同，差异仅 label/meta 文案与 dupSkipped 行。抽 RunCard
  * 后两卡收薄为调用；本文件钉死两卡的公共外壳与各自差异（含 total=0 防除零与内联 hex 归零）。
+ * 注：文案随 2026 IA 变更改为「可以关掉页面，任务在服务端继续」——书源管理已从宿主设置页
+ * 搬入小说视图 tab，「设置页」字样不再成立；钉子跟文案走。
  */
 
 const job = (over: Partial<JobState> = {}): JobState => ({
@@ -23,14 +26,14 @@ const job = (over: Partial<JobState> = {}): JobState => ({
 afterEach(cleanup)
 
 describe('RunCard 公共外壳（抽共）', () => {
-  it('ProbeRunCard：进度段 + counts 尾行 + 「可关设置页」文案原样保留', () => {
+  it('ProbeRunCard：进度段 + counts 尾行 + 「可关页面」文案原样保留', () => {
     render(<ProbeRunCard job={job()} />)
     const bar = screen.getByRole('progressbar')
     expect(bar.getAttribute('aria-valuenow')).toBe('40')
     expect(screen.getByText('验证中…')).toBeTruthy()
     expect(screen.getByText('已验证 3')).toBeTruthy()
     expect(screen.getByText('· 未通过 1')).toBeTruthy()
-    expect(screen.getByText('可以关掉设置页，任务在服务端继续')).toBeTruthy()
+    expect(screen.getByText('可以关掉页面，任务在服务端继续')).toBeTruthy()
   })
 
   it('total=0 防除零：pct 归 0（不是 NaN）', () => {
@@ -52,14 +55,16 @@ describe('RunCard 公共外壳（抽共）', () => {
     expect(screen.queryByText(/失败/)).toBeNull()
   })
 
-  it('外壳零内联 brand hex：底/描边走 --novel-brand-soft / --novel-brand-line token', () => {
+  it('外壳零内联 brand hex：底/描边由 --novel-brand-soft / --novel-brand-line 派生（住在样式层，行内一个 style 都不留）', () => {
     const { container } = render(<ProbeRunCard job={job()} />)
     const card = container.querySelector('[data-novel-run-card]')
     expect(card).not.toBeNull()
-    const style = card?.getAttribute('style') ?? ''
-    expect(style).not.toMatch(/#[0-9a-fA-F]{3,8}/)
-    expect(style).toContain('var(--novel-brand-soft)')
-    expect(style).toContain('var(--novel-brand-line)')
+    expect(card?.getAttribute('style'), '行内 style 是 token 漂移的入口').toBeNull()
+    expect(card?.className).toContain('novel-run-card')
+    // 真不变量在样式层：这两处必须是 brand 派生 token，而不是任何字面量
+    const rule = NOVEL_CSS.slice(NOVEL_CSS.indexOf('.novel-group.novel-run-card'))
+    expect(rule.slice(0, rule.indexOf('}'))).toContain('var(--novel-brand-soft)')
+    expect(rule.slice(0, rule.indexOf('}'))).toContain('var(--novel-brand-line)')
   })
 
   it('RunCard 本体是插槽件：label / meta / counts 按传入渲染', () => {

@@ -10,16 +10,20 @@ import { ErrorBanner, jobPct, RunCard } from './bits.js'
 import type { JobState } from './types.js'
 
 /**
- * 导入区（设置区「导入书源」区块）：拖放主入口 + 三态（空闲/运行/完成汇总）+ 粘贴小道。
- * 从 SettingsSection.tsx 拆出：只持「导入现场」这一份职责——
- * job 经 props 注入；import 任务的客户端缓存兜底（getLastImportJob）留在 jobs.ts 单点。
+ * 导入现场（书源管理 tab 的导入弹层内容，2026 调度台 IA）：拖放主入口 + 三态（空闲/运行/完成汇总）+ 粘贴小道。
+ * 职责：只持「导入现场」——job 经 props 注入；import 任务的客户端缓存兜底（getLastImportJob）
+ * 留在 jobs.ts 单点。改版口径：导入是低频任务，收纳进弹层（壳层 ImportModal）；提交成功后
+ * 经 onSubmitted 关弹层，任务在服务端跑，**完成事项回流待办收件箱**（新导入 → 待验证卡），
+ * 不留在原地——闭环。运行卡/完成汇总在弹层内呈现（重开弹层可回看；任务进度同时走全局状态条）。
  */
 
 /** 粘贴超此值提示改用文件导入（不阻止） */
 const BIG_PASTE_BYTES = 200 * 1024
 
-export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, deps = prodDeps }: {
+export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, onSubmitted, deps = prodDeps }: {
   job: JobState | null; refresh: () => void; unverifiedCount: number; onVerifyUnverified: () => void
+  /** 提交成功回调：弹层语境 = 关闭弹层（任务在服务端继续，结果经待办收件箱回流） */
+  onSubmitted?: () => void
   /** 依赖束：缺省生产实现；测试注入假 adapter */
   deps?: SettingsDeps
 }): ReactNode {
@@ -50,6 +54,7 @@ export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, 
         const named = await Promise.all([...files].map(async (f) => ({ name: f.name, text: await f.text() })))
         await deps.startImportJob(named)
         refresh()                                          // 立即拉一轮状态，不等下个 1s
+        onSubmitted?.()                                    // 弹层语境：提交成功即关弹层（任务在服务端跑）
       } catch (e) {
         deps.pushError(`导入提交失败：${e instanceof Error ? e.message : String(e)}`)
       } finally {
@@ -66,14 +71,18 @@ export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, 
       try {
         await deps.startImportJob([{ name: '粘贴内容', text: v }])   // 与文件导入同一任务端点
         refresh()
+        onSubmitted?.()
       } catch (e) {
         deps.pushError(`导入提交失败：${e instanceof Error ? e.message : String(e)}`)
       } finally { setSubmitting(false) }
     })()
   }
   const dropzone = (
-    <div data-novel-dropzone className="novel-group"
+    <div data-novel-dropzone
+      className={`novel-dropzone${dragging ? ' dragging' : ''}${busy || submitting ? ' busy' : ''}`}
+      role="button" tabIndex={0}
       onClick={() => { if (!busy && !submitting) fileRef.current?.click() }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!busy && !submitting) fileRef.current?.click() } }}
       onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
       onDragLeave={() => setDragging(false)}
       onDrop={(e) => {
@@ -81,34 +90,27 @@ export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, 
         setDragging(false)
         if (!busy && !submitting) submitFiles(e.dataTransfer.files)
       }}
-      style={{
-        border: `1.5px dashed ${dragging ? 'var(--novel-brand)' : 'var(--novel-border-strong)'}`,
-        borderRadius: 10, padding: '26px 16px', textAlign: 'center',
-        cursor: busy || submitting ? 'default' : 'pointer',
-        background: dragging ? 'color-mix(in srgb, var(--novel-brand) 6%, transparent)' : 'var(--novel-layer-2)',
-        opacity: busy || submitting ? 0.45 : 1, gap: 4,
-      }}>
-      <div style={{ fontSize: 22, lineHeight: 1 }}>📄</div>
-      <div style={{ fontSize: 14, marginTop: 6 }}>选择或拖入 legado 书源文件（.json，可多选）</div>
-      <div className="novel-muted">导入是后台任务——提交后关掉设置页也不影响</div>
+    >
+      <div className="novel-dropzone-icon" aria-hidden="true">📄</div>
+      <div className="novel-dropzone-lead">选择或拖入 legado 书源文件（.json，可多选）</div>
+      <div className="novel-muted">导入是后台任务——提交后本窗自动关闭，任务在服务端继续</div>
     </div>
   )
   const pasteArea = (
-    <details style={{ border: '1px solid var(--novel-border)', borderRadius: 8, background: 'var(--novel-layer-2)' }}>
-      <summary style={{ cursor: 'pointer', padding: '7px 12px', fontSize: 13, color: 'var(--novel-text-2)', userSelect: 'none' }}>
-        或粘贴 JSON（小体量/调试用）
-      </summary>
-      <div className="novel-group" style={{ padding: '2px 12px 12px', gap: 8 }}>
+    <details className="novel-paste">
+      <summary className="novel-summary">或粘贴 JSON（小体量/调试用）</summary>
+      <div className="novel-group novel-paste-body">
         <textarea
           ref={pasteRef}
           className="novel-textarea"
           onChange={recheck}
           placeholder="粘贴 legado 书源 JSON（对象或数组）"
           rows={5}
+          aria-label="粘贴 legado 书源 JSON"
         />
-        {bigPaste && <div className="novel-warn" style={{ fontSize: 12 }}>内容较大，建议改用文件导入</div>}
+        {bigPaste && <div className="novel-warn novel-note-sm">内容较大，建议改用文件导入</div>}
         {check === null ? null : (
-          <div style={{ fontSize: 13 }}>
+          <div className="novel-note-md">
             {check.ok ? (
               check.bad.length === 0
                 ? <span className="novel-ok">{check.total} 条，格式预检通过</span>
@@ -138,7 +140,7 @@ export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, 
         type="file"
         accept=".json,.txt,application/json"
         multiple
-        style={{ display: 'none' }}
+        className="novel-file-hidden"
         onChange={(e) => { submitFiles(e.target.files) }}
       />
       {/* 运行态：拖放区替换为运行卡 */}
@@ -146,21 +148,21 @@ export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, 
         <ImportRunCard job={importJob} />
       ) : (
         <>
-          {/* 完成态：绿边汇总条 + 「去验证」直达 */}
+          {/* 完成态：左侧竖条说成败 + 「去验证」直达 */}
           {importJob !== null && importJob.phase !== 'running' && (
-            <div className="novel-panel" style={{ borderLeft: `3px solid ${importJob.phase === 'failed' ? 'var(--novel-err)' : 'var(--novel-ok)'}` }}>
-              <div className="novel-toolbar" style={{ flexWrap: 'wrap' }}>
+            <div className={`novel-panel novel-result${importJob.phase === 'failed' ? ' err' : ''}`}>
+              <div className="novel-toolbar">
                 <strong className={importJob.phase === 'failed' ? 'novel-err' : 'novel-ok'}>
                   {importJob.phase === 'failed' ? '导入中断' : '导入完成'}
                 </strong>
-                <span style={{ fontSize: 13 }}>
+                <span className="novel-note-md">
                   新增 {importJob.counts.ok}
                   {importJob.counts.replaced > 0 && ` · 已替换 ${importJob.counts.replaced}`}
                   {importJob.counts.dupSkipped > 0 && ` · 重复跳过 ${importJob.counts.dupSkipped}`}
                   {importJob.counts.failed > 0 && ` · 失败 ${importJob.counts.failed}`}
                 </span>
                 <button className="novel-btn sm" onClick={() => setShowDetail(!showDetail)}>查看明细</button>
-                <span style={{ flex: 1 }} />
+                <span className="novel-grow" />
                 {unverifiedCount > 0 && (
                   <button className="novel-btn sm primary" disabled={busy}
                     onClick={() => { onVerifyUnverified(); refresh() }}>
@@ -174,7 +176,7 @@ export function ImportPane({ job, refresh, unverifiedCount, onVerifyUnverified, 
           )}
           {dropzone}
           {pasteArea}
-          <div className="novel-muted" style={{ fontSize: 12 }}>
+          <div className="novel-muted">
             本插件不提供、不内置任何书源；导入不自测，导入后可批量验证。
           </div>
         </>
@@ -204,12 +206,12 @@ export function ImportRunCard({ job }: { job: JobState }): ReactNode {
 /** 汇总明细：坏文件 + issues（失败/重复/替换点名），642 条全铺屏是灾难——点开才展示 */
 function ImportIssues({ job }: { job: JobState }): ReactNode {
   return (
-    <div className="novel-group" style={{ marginTop: 6 }}>
+    <div className="novel-group novel-issues">
       {job.fileErrors.map((f) => (
-        <div key={f.file} className="novel-err" style={{ fontSize: 13 }}>{f.file}：{f.error}</div>
+        <div key={f.file} className="novel-err novel-note-md">{f.file}：{f.error}</div>
       ))}
       {job.issues.length === 0 ? null : job.issues.map((i, n) => (
-        <div key={n} style={{ fontSize: 13 }}>
+        <div key={n} className="novel-note-md">
           <span className={i.kind === 'failed' ? 'novel-err' : i.kind === 'warning' ? 'novel-warn' : 'novel-muted'}>
             {JOB_ISSUE_LABEL[i.kind]} {i.name}
           </span>

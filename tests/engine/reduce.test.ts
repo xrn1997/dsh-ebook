@@ -63,3 +63,26 @@ describe('取值段 ! 排除生效（分叉②修复：此前静默丢参）', (
     expect(v).toEqual({ kind: 'list', items: [] })
   })
 })
+
+describe('中链 jsonpath 逐项目空态（取值规约：Miss 与空 List 绝不折叠）', () => {
+  it('上游已是合法空 List → 中链仍是空 List（此前折成 Miss，|| 兜底分支被劫）', async () => {
+    const page = JSON.stringify({ rows: [] })
+    expect(await evaluate('$.rows[*]@$.t', { html: page }, 'toc', 'list')).toEqual({ kind: 'list', items: [] })
+  })
+  it('逐项命中但值为空串 → 收空串元素，不判取位失败', async () => {
+    const page = JSON.stringify({ rows: [{ t: '' }, { t: '' }] })
+    expect(await evaluate('$.rows[*]@$.t', { html: page }, 'toc', 'list')).toEqual({ kind: 'list', items: ['', ''] })
+  })
+  it('非空上游逐项全部取位失败 → 仍是 Miss（修复不许把失败洗成空集合）', async () => {
+    const page = JSON.stringify({ rows: [{ t: '甲' }, { t: '乙' }] })
+    expect((await evaluate('$.rows[*]@$.nope', { html: page }, 'toc', 'list')).kind).toBe('miss')
+  })
+  it('逐位子集是空 List → 合并不贡献空串元素（空集合不得伪装成空串值）', async () => {
+    const page = JSON.stringify({ rows: [{ t: [] }, { t: [] }] })
+    expect(await evaluate('$.rows[*]@$.t[*]', { html: page }, 'toc', 'list')).toEqual({ kind: 'list', items: [] })
+  })
+  it('逐位子集非空 → 合并为展平条目（「逐项求值合并」的合并本义）', async () => {
+    const page = JSON.stringify({ rows: [{ t: ['甲', '乙'] }, { t: ['丙'] }] })
+    expect(await evaluate('$.rows[*]@$.t[*]', { html: page }, 'toc', 'list')).toEqual({ kind: 'list', items: ['甲', '乙', '丙'] })
+  })
+})

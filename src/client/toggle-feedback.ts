@@ -19,7 +19,7 @@ export interface ToggleFeedbackDeps {
  * （带行锚点 = 全局条「定位 →」跳转 + 行内 `.row-err` 红左边）。这与瞬态层自己的
  * 「ok 少而淡——开关翻转本身即成功反馈不进条」是同一条原则的延伸。
  *
- * 抽成纯函数是本仓库 client 惯例（见 source-batch.ts 头注）：策略可单测，视图只做接线。
+ * 抽成纯函数是本仓库 client 惯例（见 source-inbox.ts 头注）：策略可单测，视图只做接线。
  * 配套第二半修复在 styles.tsx：状态条自身改成不吃布局的浮层（慢操作/错误条也不再顶动内容）。
  * 口径详见 `docs/design/client.md`。
  */

@@ -3,12 +3,15 @@ import { renderToString } from 'react-dom/server'
 import { createElement } from 'react'
 import { NovelView } from '../../src/client/views/NovelView.js'
 import { SettingsSection } from '../../src/client/views/SettingsSection.js'
+import { ImportPane } from '../../src/client/views/SettingsImportPane.js'
 import { NOVEL_CSS } from '../../src/client/styles.js'
 import { routeStore } from '../../src/client/store.js'
 
 describe('NovelView smoke（renderToString 不炸——数据获取在 effect，smoke 只锁渲染分支）', () => {
   it.each([
     ['shelf', { name: 'shelf' }],
+    ['city', { name: 'city' }],
+    ['sources', { name: 'sources' }],
     ['reader', { name: 'reader', sourceId: 's', bookKey: 'k', title: 'T' }],
     ['search', { name: 'search' }],
   ])('route=%s 可渲染', (_n, route) => {
@@ -16,53 +19,59 @@ describe('NovelView smoke（renderToString 不炸——数据获取在 effect，
     const html = renderToString(createElement(NovelView))
     expect(html).toContain('data-novel')             // 根容器标记
   })
-  it('首页 = 居中搜索框 + 封面网格', () => {
+  it('首页 = 顶部搜索 + 封面网格（书架 tab）', () => {
     routeStore.set({ route: { name: 'shelf' } as any })
     const html = renderToString(createElement(NovelView))
     expect(html).toContain('data-novel-view="shelf"')
-    expect(html).toContain('placeholder="搜书名 / 作者"')   // 首页搜索框
+    expect(html).toContain('placeholder="搜书名 / 作者"')   // 书架搜索框
   })
-  it('设置「小说」区块：导入子面 = 拖放区主入口 + 粘贴折叠区', () => {
+  it('书城 tab = 占位空态（CityView，内容未上线）', () => {
+    routeStore.set({ route: { name: 'city' } as any })
+    const html = renderToString(createElement(NovelView))
+    expect(html).toContain('data-novel-view="city"')
+    expect(html).toContain('书城未上线')
+  })
+  it('导入弹层：内容子面（ImportPane）自带拖放主入口 + 粘贴折叠区；壳层默认不挂载弹层', () => {
+    const paneHtml = renderToString(createElement(ImportPane, {
+      job: null, refresh: () => {}, unverifiedCount: 0, onVerifyUnverified: () => {},
+    }))
+    expect(paneHtml).toContain('data-novel-dropzone')                // 拖放区是主入口
+    expect(paneHtml).toContain('选择或拖入 legado 书源文件')
+    expect(paneHtml).toContain('粘贴 legado 书源')                   // 粘贴降级折叠区仍在
+    expect(paneHtml).not.toContain('data-novel-run-card')            // 无任务不渲染运行卡
     const html = renderToString(createElement(SettingsSection))
-    expect(html).toContain('data-novel-dropzone')                // 拖放区是主入口
-    expect(html).toContain('选择或拖入 legado 书源文件')
-    expect(html).toContain('粘贴 legado 书源')                   // 粘贴降级折叠区仍在
-    expect(html).not.toContain('data-novel-run-card')            // 无任务不渲染运行卡
-    expect(html).not.toContain('data-novel-job-status')          // 无任务不渲染状态条
-    expect(html).not.toContain('data-novel-status-bar')          // 空闲零占用：无条目时全局状态条整体不渲染
+    expect(html).toContain('data-novel-import-open')                 // 弹层触发钮在列表头
+    expect(html).not.toContain('data-novel-dropzone')                // 弹层默认关闭（低频任务不常驻占版面）
+    expect(html).not.toContain('data-novel-status-bar')              // 空闲零占用：无条目时全局状态条整体不渲染
   })
   it('§5.4 风格统一：原生 file input 隐藏（拖放区点击触发，不裸露原生控件）', () => {
-    const html = renderToString(createElement(SettingsSection))
-    expect(html).toContain('type="file"')
-    expect(html).toMatch(/display:\s*none/)                      // 隐藏 input + 拖放区点击/drop 触发
+    const paneHtml = renderToString(createElement(ImportPane, {
+      job: null, refresh: () => {}, unverifiedCount: 0, onVerifyUnverified: () => {},
+    }))
+    expect(paneHtml).toContain('type="file"')
+    expect(NOVEL_CSS).toMatch(/\.novel-file-hidden\s*\{[^}]*display:\s*none/)   // 隐藏规则住样式层
   })
-  it('源列表：chips 过滤条 + 浏览态纯浏览（复选框/行操作不渲染）', () => {
-    const html = renderToString(createElement(SettingsSection))
-    expect(html).toContain('data-novel-chip="all"')
-    expect(html).toContain('data-novel-chip="disabled"')         // 已停用 chip（启停功能）
-    expect(html).toContain('data-novel-edit-toggle')             // 表头「编辑」显式切换
-    expect(html).not.toContain('type="checkbox"')                // 浏览态无复选框
-    expect(html).toContain('危险操作（整库级）')                  // 危险操作折叠区
-  })
-  it('IA：表格是末位元素——列表级操作在表格之前（长列表下表格之下摸不着，增补）', () => {
-    const html = renderToString(createElement(SettingsSection))
-    const atTable = html.indexOf('class="novel-table"')
-    expect(atTable).toBeGreaterThan(-1)
-    expect(html.indexOf('危险操作（整库级）')).toBeLessThan(atTable)   // 危险区上移，不沉底
-    expect(html.indexOf('验证全部未验证')).toBeLessThan(atTable)      // 验证入口同理
-  })
-  it('设置「小说」区块：源列表渲染为行式列表 + 过滤框（630 源必须可定位）', () => {
+  it('源列表：状态下拉 + 浏览态纯浏览（复选框/危险区不渲染）；待办箱数据未到不渲染', () => {
     const html = renderToString(createElement(SettingsSection))
     expect(html).toContain('data-novel-source-list')
     expect(html).toContain('data-novel-source-filter')
     expect(html).toContain('data-novel-group-filter')            // 分组下拉过滤
+    expect(html).toContain('data-novel-status-filter')           // 状态 chips → 下拉（2026 改版）
+    expect(html).not.toContain('data-novel-chip=')               // 状态 chips 退役（读数归待办箱）
+    expect(html).toContain('data-novel-edit-toggle')             // 「编辑」显式切换
+    expect(html).not.toContain('type="checkbox"')                // 浏览态无复选框
+    expect(html).not.toContain('危险操作（整库级）')              // 危险区退役：删除=统一模态二次确认
+    expect(html).not.toContain('data-novel-inbox')               // sources 未加载：待办不渲染（不拿未知当「全部良好」）
+    expect(html).not.toContain('data-novel-section-toggle')      // 手风琴退役（sections.ts 已删）
   })
-  it('设置「小说」区块：手风琴区块头可折叠（源列表与导入各有折叠钮）', () => {
+  it('IA：列表级操作在表格之前——长列表下表格之下摸不着（2026 改版：操作收进列表头）', () => {
     const html = renderToString(createElement(SettingsSection))
-    expect(html).toContain('data-novel-section-toggle="list"')
-    expect(html).toContain('data-novel-section-toggle="import"')
+    const atTable = html.indexOf('class="novel-table"')
+    expect(atTable).toBeGreaterThan(-1)
+    expect(html.indexOf('data-novel-source-filter')).toBeLessThan(atTable)   // 过滤工具在表前
+    expect(html.indexOf('data-novel-import-open')).toBeLessThan(atTable)     // 导入入口在表前
   })
-  it('设置「小说」区块自带样式层（宿主设置是另一棵 React 树——不自带则 novel-* 类全裸奔）', () => {
+  it('设置「小说」区块自带样式层（挂载点无关的自足性：组件在哪棵树渲染 novel-* 类都不裸奔）', () => {
     const html = renderToString(createElement(SettingsSection))
     expect(html).toContain('data-novel-style')
     expect(html).toContain('.novel-btn')
@@ -77,6 +86,14 @@ describe('NovelView smoke（renderToString 不炸——数据获取在 effect，
     const html = renderToString(createElement(NovelView))
     expect(html).toContain('data-novel-style')
     expect(html).toContain('.novel-btn')
+  })
+  it('样式层恰一条：书源管理 tab 不再同树注两遍（SettingsSection 单飞时仍自带）', () => {
+    const count = (s: string): number => (s.match(/data-novel-style/g) ?? []).length
+    routeStore.set({ route: { name: 'sources' } as any })
+    expect(count(renderToString(createElement(NovelView)))).toBe(1)   // 宿主根注入，子组件让位
+    routeStore.set({ route: { name: 'shelf' } as any })
+    expect(count(renderToString(createElement(NovelView)))).toBe(1)
+    expect(count(renderToString(createElement(SettingsSection)))).toBe(1)  // 离开宿主仍自足
   })
   it('布局修复：根容器是 flex 列布局（视图区 flex:1——此前被 height:100% 挤出视口）', () => {
     routeStore.set({ route: { name: 'shelf' } as any })

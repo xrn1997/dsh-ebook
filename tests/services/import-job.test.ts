@@ -226,4 +226,31 @@ describe('批量验证任务', () => {
     expect(j.issues.some((i) => i.detail.includes('运行中被删除'))).toBe(true)
     expect(j.issues.some((i) => i.detail.includes('undefined') || i.detail.includes('TypeError'))).toBe(false)
   })
+  it('探针在途删掉被探源（最窄交错窗口）：setStatus 打在已删除 id 上 = 优雅 no-op，任务照常收尾、无幽灵源', async () => {
+    // 用户拍板（2026）：验证在途允许删除，前提 = 无并发安全问题。本用例钉最窄的窗口——
+    // worker 已通过重查、探针请求在途，此刻删除落在**被探源自己**头上；探针 resolve 后
+    // worker 才写回 setStatus(已删除 id)。安全依据：sources.ts setStatus 首行
+    // `if (!s) return false`（查不到即 no-op，不抛、不复活），edit recipe 同步执行原子。
+    let n = 0
+    let victimId = ''
+    const { jobs, registry } = await mkJobs(async () => {
+      n++
+      if (n === 1) {                                 // 第一发探针（源 A 自己）在途期间删掉 A
+        void registry.edit((tx) => tx.remove(victimId))   // edit recipe 同步生效（与「洞3」用例同款手法）
+        await new Promise((r) => setTimeout(r, 5))
+      }
+      return okProbe
+    })
+    jobs.startImport([{ name: 'a.json', text: JSON.stringify([
+      raw('A', 'https://a.com'), raw('B', 'https://b.com'),
+    ]) }])
+    await waitDone(jobs)
+    victimId = registry.list()[0].id
+    jobs.startBatchProbe(registry.list().map((s) => s.id))
+    const j = await waitDone(jobs)
+    expect(j.phase).toBe('done')                     // 单条交错不炸整任务
+    expect(registry.list().map((s) => s.id)).not.toContain(victimId)   // no-op ≠ 复活：被删源保持删除
+    expect(registry.list().some((s) => s.id !== victimId && s.status === 'verified')).toBe(true)   // B 不受牵连
+    expect(j.issues.some((i) => i.detail.includes('TypeError'))).toBe(false)
+  })
 })

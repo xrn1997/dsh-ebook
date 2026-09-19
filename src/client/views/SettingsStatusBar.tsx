@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { useTransient } from '../transient.js'
 import { jobKindLabel } from '../jobs.js'
 import { jobPct, ProgressBar } from './bits.js'
@@ -12,14 +12,8 @@ import type { JobState } from './types.js'
  * interface：job（任务现场）+ onOpen（点任务泳道跳转到对应区块）。
  */
 
-/** 泳道公共样式：老 JobStatusBar 的细条观感，逐泳道扩 grid 列 */
-function statusLane(extra?: CSSProperties): CSSProperties {
-  return {
-    display: 'grid', gap: 8, alignItems: 'center', width: '100%', textAlign: 'left',
-    border: 'none', padding: '4px 12px', fontSize: 12, cursor: 'pointer',
-    background: 'transparent', color: 'inherit', font: 'inherit', ...extra,
-  }
-}
+/** 泳道形状（栏数 / 弱底 / 光标）归样式类 .novel-lane.cols-*：原先由 statusLane() 工厂
+ *  每次渲染现造五个 style 对象，样式表里搜不到这些规则，改观感要改 JS。 */
 
 export function GlobalStatusBar({ job, stale = false, onOpen }: { job: JobState | null; stale?: boolean; onOpen: () => void }): ReactNode {
   const { entries, dismiss } = useTransient()
@@ -32,13 +26,12 @@ export function GlobalStatusBar({ job, stale = false, onOpen }: { job: JobState 
   return (
     <div data-novel-status-bar className="novel-status-bar">
       {stale && (
-        <div data-novel-job-stale className="novel-warn" style={statusLane({ cursor: 'default', gridTemplateColumns: '1fr' })}>
+        <div data-novel-job-stale className="novel-warn novel-lane cols-1">
           连接异常，重试中……（任务状态刷新失败，显示的是最后一帧）
         </div>
       )}
       {errors.map((e) => (
-        <div key={e.id} className="novel-err"
-          style={statusLane({ gridTemplateColumns: 'auto 1fr auto auto', background: 'var(--novel-err-weak)' })}>
+        <div key={e.id} className="novel-err novel-lane cols-err">
           <span>⚠ {e.label}</span>
           <span />
           {e.anchor === undefined ? null : (
@@ -51,23 +44,21 @@ export function GlobalStatusBar({ job, stale = false, onOpen }: { job: JobState 
         </div>
       ))}
       {running && job !== null && (
-        <button data-novel-job-status style={statusLane({ gridTemplateColumns: 'auto auto 1fr auto' })} onClick={onOpen}>
+        <button data-novel-job-status className="novel-lane cols-job" onClick={onOpen}>
           <span className="novel-muted">{jobKindLabel(job.kind)}中…</span>
           <span className="novel-muted">{job.done}/{job.total}（{pct}%）</span>
           {/* 迷你进度条与两区运行卡同源：ProgressBar + jobPct，仅高度覆写 */}
           <ProgressBar pct={pct} style={{ height: 4 }} />
-          <span style={{ color: 'var(--novel-brand)', whiteSpace: 'nowrap' }}>点此查看 →</span>
+          <span className="novel-lane-link">点此查看 →</span>
         </button>
       )}
       {pendings.length > 0 && (
-        <div className="novel-muted" style={statusLane({ cursor: 'default', gridTemplateColumns: '1fr' })}>
+        <div className="novel-muted novel-lane cols-1">
           {pendings.length === 1 ? pendings[0].label : `正在保存 ${pendings.length} 项…`}
         </div>
       )}
       {oks.map((e) => (
-        <div key={e.id} className="novel-ok" style={statusLane({ cursor: 'default', gridTemplateColumns: '1fr' })}>
-          ✓ {e.label}
-        </div>
+        <div key={e.id} className="novel-ok novel-lane cols-1">✓ {e.label}</div>
       ))}
     </div>
   )

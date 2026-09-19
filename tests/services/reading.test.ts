@@ -150,7 +150,7 @@ describe('ReadingService', () => {
     expect(groups[0].hits[0].url).toBe('https://s.com/landed/book/1/')
   })
 
-  it('getToc 两页跟 nextTocUrl 三闸合并，二次命中缓存零网络', async () => {
+  it('getToc 两页跟 nextTocUrl 翻页闸合并，二次命中缓存零网络', async () => {
     let tocFetches = 0
     const { svc, registry } = await makeService((u) => {
       if (u.includes('/book/1/')) { tocFetches++; return TOC_HTML }
@@ -293,6 +293,24 @@ describe('ReadingService', () => {
     const src = registry.list().at(-1)!   // makeService 已导过 rawSource，取最后导入的
     const toc = await svc.getToc(src.id, `${BASE}/book/1/`)
     expect(toc.map((c) => c.name)).toEqual(['第一章', '第二章', '第三章'])
+  })
+
+  it('整本取不到章节 URL → 如实抛错，不产出全指目录页的假目录（2026-09 审查）', async () => {
+    // 逐章回退（legado BookChapterList「未获取到url,使用baseUrl替代」）保留，但「每一条都
+    // 回退」不是缺个别链接，而是 ruleChapterUrl 整体失效——静默产出 200 条指向目录页的
+    // toc 等于拿合法形状冒充成功（本仓镜像的宁炸不猜）。
+    const noHref = '<html><body><div class="b ch"><a>第一章</a></div><div class="b ch"><a>第二章</a></div></body></html>'
+    const { svc, registry } = await makeService((u) => (u.includes('/book/1/') ? noHref : null))
+    await expect(svc.getToc(registry.list().at(-1)!.id, `${BASE}/book/1/`)).rejects.toThrow(/ruleChapterUrl/)
+  })
+
+  it('只有个别章取不到 URL → 仍逐章回退目录页（不许把 legado 对齐改回整条丢弃）', async () => {
+    const mixed = '<html><body><div class="b ch"><a href="/c/1.html">第一章</a></div><div class="b ch"><a>第二章</a></div></body></html>'
+    const { svc, registry } = await makeService((u) => (u.includes('/book/1/') ? mixed : null))
+    const toc = await svc.getToc(registry.list().at(-1)!.id, `${BASE}/book/1/`)
+    expect(toc.map((c) => c.name)).toEqual(['第一章', '第二章'])
+    expect(toc[0].url).toBe(`${BASE}/c/1.html`)
+    expect(toc[1].url).toBe(`${BASE}/book/1/`)   // 缺链接的那章回退目录页地址，不丢条目
   })
 
   it('详情面优先 ruleDetail*（搜索/详情两上下文规则不同），缺时回退共用字段', async () => {

@@ -75,3 +75,18 @@ describe('applyReplaces 净化（## 替换）', () => {
     }
   })
 })
+
+describe('interp 查表只认自有键（不许顺原型链捞 Object.prototype 成员）', () => {
+  const b = { baseUrl: 'https://x.com' } as Record<string, string>
+  // 插值作用在 pattern/replacement 串上（legado makeUpRule：替换规则先插值再当正则），
+  // 所以钉子把 {{键}} 放进 replacement——放进正文文本是测不到 interpolate 的。
+  it.each(['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf'])('%s 保持字面', (key) => {
+    const replacement = `前{{${key}}}后`
+    expect(applyReplaces({ kind: 'value', text: 'X' }, [step('X', replacement)], false, undefined, b))
+      .toEqual({ kind: 'value', text: replacement })
+  })
+  it('真在 bindings 里的键照常插值（收紧不许顺手把正路堵死）', () => {
+    expect(applyReplaces({ kind: 'value', text: 'X' }, [step('X', '{{baseUrl}}')], false, undefined, b))
+      .toEqual({ kind: 'value', text: 'https://x.com' })
+  })
+})

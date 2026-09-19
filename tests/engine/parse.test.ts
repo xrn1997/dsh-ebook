@@ -174,6 +174,16 @@ describe('隐式 CSS 新形态（642 源重探归因驱动）', () => {
     expect(parseRule('[class="col-12 col-md-6"]@text').branches[0].segments[0])
       .toEqual({ kind: 'css', selector: '[class="col-12 col-md-6"]' })
   })
+  it('选择器特征字符 → css 段（含 `#` `[` `>` `+` `~` `=` `,` 或 `*` 开头即交 css-select 求值）', () => {
+    // 放宽的是「哪串字符像选择器」，不是「认不出也不报」：解析不了的形态在求值层如实
+    // RuleEvalError（带段定位），不再在解析期误报「无法识别的段类型」
+    for (const raw of ['ul#ncp3_ul li', 'a[href*="_"]', 'li[style~=width:100%;]', '*[href]', 'div,span']) {
+      expect(parseRule(`${raw}@text`).branches[0].segments[0], raw).toEqual({ kind: 'css', selector: raw })
+    }
+  })
+  it('放宽的边界：无选择器特征的未知串仍在解析期抛（宁炸不猜不外扩）', () => {
+    expect(() => parseRule('nonsense span@text')).toThrow(UnsupportedRuleError)  // 空白组合但首词非标签
+  })
   it('词.词形态仍炸（首词非标签——与 default 方言歧义，宁炸不猜的边界不外扩）', () => {
     expect(() => parseRule('tplData.books@text')).toThrow(UnsupportedRuleError)
   })

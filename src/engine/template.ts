@@ -7,7 +7,7 @@ export function interpolateUrl(
   return template.replace(/\{\{([^{}]*)\}\}/g, (whole, inner: string) => {
     // 词法拆分归 grammar.splitVarExpr 单点（此前与搜索面 isPureVarExpr 各写一份 || 拆分）
     const { name, fallback } = splitVarExpr(inner)
-    if (name in vars) return encodeURIComponent(String(vars[name]))
+    if (Object.hasOwn(vars, name)) return encodeURIComponent(String(vars[name]))
     if (fallback !== null) return fallback
     return whole
   })

@@ -28,7 +28,10 @@ export async function probeSource(
       if (page.items.length === 0) continue // 换下一词（0 命中可能是词被停用，非源坏）
       const nameRule = source.rules.ruleBookName
       if (nameRule === null) return fail('RuleMissing', '源未声明 ruleBookName', 0)   // 搜索面已拦；此处为类型收窄
-      const first = firstValue(await page.subEval(nameRule, { html: page.items[0], baseUrl: page.landedUrl }, 'search'), 'search')
+      // usage='value'：与搜索面取书名同口径（`reading.ts` 对同一 ruleBookName、同一 item
+      // 用 'value'）。规则以属性终端收尾（`@onclick`/`@_src`）时两种用途结果不同——
+      // 探针漏传该参数会把搜索面读得出书名的源判成「首条书名为空」的坏源（2026-09 审查）。
+      const first = firstValue(await page.subEval(nameRule, { html: page.items[0], baseUrl: page.landedUrl }, 'search', 'value'), 'search')
       if (first === null || first.trim() === '') {
         return fail('RuleEvalError', `首条书名为空（段 ruleBookName: ${nameRule}）`, page.items.length)
       }

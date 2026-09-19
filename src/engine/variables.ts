@@ -34,8 +34,10 @@ export function resolveJsonData(ctx: EvalContext): unknown {
  *   - 其他规则形态（XPath `//…`、`@css:`、`<js>`、`#{}` 等）→ UnsupportedRuleError。
  *
  * pairs 解析（手写小 parser，不用 JSON.parse——legado 的值不保证是严格 JSON）：
- *   `{` 开头 `}` 结尾；顶层逗号切分（引号内逗号不切）；每项 `key:"value"`；
- *   v1 REQUIREMENTS：值必须带双引号，不带引号 → UnsupportedRuleError「@put 值必须带引号」。
+ *   `{` 开头 `}` 结尾；顶层逗号切分（引号内逗号不切）；每项 `key:"value"` 或 `key:裸值`。
+ *   引号有意义：带引号 = 显式字面量；裸值 = 先当 JSONPath（`$.`/`@json:`），否则按 legado
+ *   口径对当前条目做**键访问**，键不在才字面存。（「值必须带双引号，否则抛错」是 v1 旧口径，
+ *   实测 2 源直接炸，已废——但引号与裸值的这条分界必须保住，见 `evalPut` 的键访问分支。）
  *
  * `@get:name` → 读 `ctx.vars[name]`；未 put 过 / vars 未初始化 → Miss（detail 提到键名）。
  */
@@ -44,14 +46,16 @@ function reject(detail: string, pairsRaw: string, loc: SegmentLoc, facet: Facet)
   throw new UnsupportedRuleError(detail, { ...loc, facet })
 }
 
-/** 手写 pairs 解析：顶层逗号切分（引号内不切），每项 key:"value"（v1 值必须带引号） */
-function parsePairs(pairsRaw: string, loc: SegmentLoc, facet: Facet): Array<[string, string]> {
+/** 手写 pairs 解析：顶层逗号切分（引号内不切），每项 key:"value" 或 key:裸值
+ *  （legado 真实源 `@put:{cid:ComicID}`、`@put:{img:pic}` 无引号形态——v1 曾要求必带引号，
+ *  实测 2 源直接抛错；现两种形态都收：引号值处理转义，裸值读到顶层逗号为止） */
+function parsePairs(pairsRaw: string, loc: SegmentLoc, facet: Facet): Array<[string, string, boolean]> {
   const s = pairsRaw.trim()
   if (!s.startsWith('{') || !s.endsWith('}')) {
     reject('@put 形态必须为 {key:"value", …}（{ 开头 } 结尾）', pairsRaw, loc, facet)
   }
   const inner = s.slice(1, -1)
-  const pairs: Array<[string, string]> = []
+  const pairs: Array<[string, string, boolean]> = []
   const n = inner.length
   let i = 0
   const skipWs = (): void => { while (i < n && /\s/.test(inner[i])) i++ }
@@ -67,19 +71,27 @@ function parsePairs(pairsRaw: string, loc: SegmentLoc, facet: Facet): Array<[str
     if (i >= n || inner[i] !== ':') reject(`@put 键值对缺少冒号：${JSON.stringify(key)}`, pairsRaw, loc, facet)
     i++ // 吃掉 ':'
     skipWs()
-    if (inner[i] !== '"') reject('@put 值必须带引号', pairsRaw, loc, facet)
-    i++ // 吃掉开引号
     let value = ''
-    let closed = false
-    while (i < n) {
-      const c = inner[i]
-      if (c === '\\' && i + 1 < n) { value += inner[i + 1]; i += 2; continue } // \" 转义
-      if (c === '"') { closed = true; i++; break }
-      value += c
-      i++
+    let quoted = false                              // 值是否带双引号：显式字面量的唯一记号
+    if (inner[i] === '"') {
+      quoted = true
+      i++ // 吃掉开引号
+      let closed = false
+      while (i < n) {
+        const c = inner[i]
+        if (c === '\\' && i + 1 < n) { value += inner[i + 1]; i += 2; continue } // \" 转义
+        if (c === '"') { closed = true; i++; break }
+        value += c
+        i++
+      }
+      if (!closed) reject('@put 值引号未闭合', pairsRaw, loc, facet)
+    } else {
+      // 裸值：读到顶层逗号为止（key:value 形态——legado LinkedTreeMap 键访问/字面串）
+      const vStart = i
+      while (i < n && inner[i] !== ',') i++
+      value = inner.slice(vStart, i).trim()
     }
-    if (!closed) reject('@put 值引号未闭合', pairsRaw, loc, facet)
-    pairs.push([key, value])
+    pairs.push([key, value, quoted])
     skipWs()
     if (i >= n) break
     if (inner[i] !== ',') reject(`@put 顶层逗号分隔处出现意外字符：${JSON.stringify(inner[i])}`, pairsRaw, loc, facet)
@@ -105,7 +117,7 @@ export function evalPut(pairsRaw: string, ctx: EvalContext, loc: SegmentLoc, fac
     if (res.kind === 'miss') return
     reject(`@put 的 JSONPath 求值结果为列表，v1 变量只存单值（键: ${key}）`, pairsRaw, loc, facet)
   }
-  for (const [key, value] of pairs) {
+  for (const [key, value, quoted] of pairs) {
     if (value.startsWith('$.')) {
       // JSONPath 规则（钉死 `$.` 起——`$..` 递归下降被 `$.` 前缀天然覆盖；裸 `$`、`$99` 等
       // 不以 `$.` 开头的值不构成 JSONPath 规则，落入下方普通字符串原样存）
@@ -118,16 +130,34 @@ export function evalPut(pairsRaw: string, ctx: EvalContext, loc: SegmentLoc, fac
       // 其他规则形态（XPath / @css: / <js> / #{} 等）v1 不支持——宁炸不猜
       reject(`@put 值不支持该规则形态（v1 仅支持普通字符串或 JSONPath）：${JSON.stringify(value)}`, pairsRaw, loc, facet)
     } else {
-      staged[key] = value // 普通字符串 → 原样存
+      // legado 口径（AnalyzeRule.getString 的 LinkedTreeMap 分支「键值直接访问」）：
+      // **裸值** = 对当前 JSON 条目按键取值（`@put:{img:pic}` → vars.img = 条目.pic）；
+      // 键不存在 / 非 JSON 上下文 → 字面存（比空串如实——@get 拿到原文可诊断）。
+      // 带双引号的值是用户显式写的字面量，**不做这层推断**（`@put:{img:"pic"}` 存 'pic'）：
+      // 引号是「我要字面量」的唯一记号，把它当裸值会让同一份数据两种结果互相覆盖（2026-09 审查）。
+      // 豁免只到键访问这一层——`$.` / `@json:` 前缀与不支持的规则形态即便带引号仍按声明处理
+      // （那些是显式语法记号，不是推断；见 `it('XPath 等其他规则形态的值 → UnsupportedRuleError')`）。
+      const data = quoted ? null : resolveJsonData(ctx)
+      if (value !== '' && data !== null && typeof data === 'object' && !Array.isArray(data)
+        && Object.prototype.hasOwnProperty.call(data, value)) {
+        const hit = (data as Record<string, unknown>)[value]
+        if (typeof hit === 'string' || typeof hit === 'number' || typeof hit === 'boolean') {
+          staged[key] = String(hit)
+          continue
+        }
+      }
+      staged[key] = value
     }
   }
   Object.assign(ctx.vars ??= {}, staged)
   return { kind: 'value', text: pairsRaw }
 }
 
-/** `@get:` 段求值：读 `ctx.vars[name]`；未 put 过 → Miss（detail 提到键名） */
+/** `@get:` 段求值：读 `ctx.vars` 的**自有键**；未 put 过（含原型链成员名）→ Miss（detail 提到键名） */
 export function evalGetVar(name: string, ctx: EvalContext): EngineValue {
-  const v = ctx.vars?.[name]
-  if (v === undefined) return { kind: 'miss', detail: `变量未定义：${name}` }
-  return { kind: 'value', text: v }
+  const vars = ctx.vars
+  // 自有键判定：`ctx.vars?.[name]` 顺原型链会把 Object.prototype.toString 当变量值返回
+  // （声明是 string 实为函数，一路带进正文），且永远算不上「未 put 过」。
+  if (vars === undefined || !Object.hasOwn(vars, name)) return { kind: 'miss', detail: `变量未定义：${name}` }
+  return { kind: 'value', text: vars[name] }
 }

@@ -8,13 +8,14 @@
 
 | 文件 | 职责 | 关键导出 | owner 语义 |
 | --- | --- | --- | --- |
-| `engine/types.ts` | 值形状与 AST | `Facet`、`EngineValue`、`Segment`、`Branch`、`ParsedRule`、`EvalContext`、`DEFAULT_JS_TIMEOUT_MS`(2000) | `EngineValue` 五态（miss/value/list/nodes/matches）的唯一定义处。`Facet` 比文档多一个 `explore`（无生产调用方，见「已知开口」） |
+| `engine/types.ts` | 值形状与 AST | `Facet`、`EngineValue`、`Segment`、`Branch`、`ParsedRule`、`EvalContext`、`RuleUsage`、`DEFAULT_JS_TIMEOUT_MS`(2000) | `EngineValue` 五态（miss/value/list/nodes/matches）的唯一定义处。`Facet` 比文档多一个 `explore`（无生产调用方，见「已知开口」）；`EvalContext` 另携 `book`/`chapter`（legado 脚本变量，服务层按面注入） |
 | `engine/errors.ts` | 三类引擎错误 | `EngineError`、`UnsupportedRuleError`、`RuleEvalError`(+`hits`)、`JsSandboxError`(+`script`/`line`)、`isEngineError` | 段级定位文案的唯一格式化点：`[facet#段N] msg（规则片段: "raw"）` |
-| `engine/parse.ts` | 词法流水线：字符串 → AST（零 IO） | `parseRule(rule, facet='rule')` | 切分次序、段识别白名单、隐式 CSS 回落、位置后缀、「不认识就炸」的唯一位置 |
+| `engine/parse.ts` | 词法流水线：字符串 → AST（零 IO） | `parseRule(rule, facet='rule', usage='list')` | 切分次序、段识别白名单、隐式 CSS 回落、位置后缀、**属性终端**（取值用途链尾未知词 = 属性名，见 CONTEXT.md「取值用途」）、**模板字面段**识别（判据借 `literal.isLiteralForm`）、「不认识就炸」的唯一位置 |
 | `engine/grammar.ts` | 规则文法：构词与解析同属一处 | `parseTails`、`appendTail`、`withImplicitText`、`jsRegionEnd`、`isJsForm`、`splitVarExpr`、`isPureVarExpr` | `##` 净化尾与 JS 区域语法的唯一认知点；normalize 的方言拼串只能经 `appendTail` |
+| `engine/literal.ts` | 模板字面段的识别与切分 | `isLiteralForm`、`splitLiteral`、`LiteralPart` | `{{expr}}`（JS/规则二分——以 `@`/`$.`/`$[`/`//` 开头按规则）与 `{$.path}` 单括号内嵌、`@get:`、`{{}}` 平衡括号切分的唯一认知点（parse 识别与 evaluate 消费共用同一份） |
 | `engine/template.ts` | URL 模板插值 | `interpolateUrl(template, vars)` | `{{name||缺省}}` 的替换口；词法拆分借 `grammar.splitVarExpr` |
 | `engine/dom.ts` | cheerio 封装与纯文本契约 | `loadHtml`、`cleanText`、`nodeText`、`htmlToText`、`looksLikeHtml`、`isNodeValue` | 「块级边界落成 `\n`」的正文契约唯一实现（不是 cheerio `.text()`） |
-| `engine/select.ts` | default 选择段/取值段 | `reducePicked`、`applyIndex`、`applyExclude`、`evalDefault` | **取值规约的唯一实现**：`reducePicked` 管取位与空态裁决，`getValue` 管「元素在、取值全空 → 空 List」 |
+| `engine/select.ts` | default 选择段/取值段 | `reducePicked`、`applyIndex`、`applyExclude`、`evalDefault` | **取值规约的唯一实现**：`reducePicked` 管取位与空态裁决，`getValue` 管「元素在、取值全空 → 空 List」；`text.<串>` 按文本选元素（CONTEXT.md「按文本选元素」）与属性终端 `mode:'attr'`（空值丢弃 + 去重 + 向下兜底）同属此处 |
 | `engine/css.ts` | `@css:` 段 | `evalCss` | 只做 `cur.find(selector)` + 消费 `reducePicked`；显式形态带 `!` 排除，位置后缀仅隐式回落形态携带 |
 | `engine/xpath.ts` | XPath 子集求值器 | `evalXPath` | 直接在 domhandler 节点树上求值；轴/谓词/函数白名单与「位置谓词按父分组」都只在这里 |
 | `engine/jsonpath.ts` | JSONPath 子集 | `evalJsonPath` | 手写 tokenizer；下标/切片负数从尾数与「取位失败 → Miss、空数组 → 空 List」的 JSONPath 侧口径 |
@@ -37,6 +38,8 @@
 - 选择段（`default` 的 class/id/tag/child/children 与 `css` 段）：`engine/select.ts` 的 `reducePicked` 把 `exclude` 过滤 → `index` 取位 → 空态裁决串成一处，四种失败态 `zero`/`excluded`/`oob`/`sliced` **一律判「选择失败」→ Miss**。
 - 取值段（`engine/select.ts` 的 `getValue`）：同样消费 `reducePicked` 做取位；只有「元素在、取值全空」（`texts.length === 0`）才给空 List。`textNodes` 是唯一恒产 List 的取值段（`select.ts` 的 `textNodes` 分支）。
 - JSONPath 同口径（`engine/jsonpath.ts` 的 `evalJsonPath`）：零命中/取到 `null`/下标越界/切片裁空 → Miss；**解析到空集合**（`[*]` 与 `[]` 是同一通配的两种写法，打在空数组上）→ 空 List。集合型末段（`[*]`、`[a:b]`、`..name`）哪怕只收一项也恒产 List（`jsonpath.ts` 的 `collection` 判定）。
+- **中链 jsonpath 逐项目空态**（`evaluate.ts` 的 `jsonpath` case，「List → 逐项求值合并」分支）：上游是 List 时逐条目按 JSON 求值后**合并**——`miss` 条目不贡献（那是取位失败）；`list` 条目展平合并（空集合贡献零个条目，而不是一个空串条目）；其余（`value`/`matches`/`nodes`）命中即收，**空串也是值**。终局裁决：上游 List 为空 → 空 List（链首已判「解析到空集合」，逐项无物可求，中链不许改口）；非空上游逐条目**全部** `miss` 才是 Miss。链首与中链对同一输入必须给同一种值，否则 `||` 的兜底语义会随链长漂移。
+- **模板字面段的插值**（`evaluate.ts` 的 `literal` 分支）：任一插值段 Miss → 整段 Miss（Miss 折成空串会拼出语法合法的残 URL）；空 List → 空串照常参与拼接。
 - 组合符消费这个区分：`||` 认为空 List 是「未取到」继续向右（`combine.ts` 的 `combineFirst`，注释「空 List = 未取到，继续向右」），全 Miss → Miss，**全空 List（无 Miss）→ 空 List**（同函数尾的 `所有分支未命中` 与「全空 List 或零分支 → 空 List」注释）——绝不把空 List 折叠成 Miss。
 
 **为什么**：legado 的 `||` 短路语义建立在「没取到」是一个可继续的值之上。若把「取到空」也当失败，兜底分支会连带失效并静默拉回错误内容（android-ebook 血训）。
@@ -45,7 +48,7 @@
 
 **`nodes` 不许到达链终点**：选择段产 `nodes` 供后续段消费；若规则以节点集收尾，服务层的 `firstValue`/`listValue` 抛 `RuleEvalError('结果不是取值而是节点集')`（`services/bridge.ts` 的 `nodesError`，`segmentIndex: -1`）。这也是 Native 方言要补隐式 `@text` 的原因——不补就会以节点集收尾。
 
-**被否决的替代方案**：① 选择段切片裁空给空 List——曾如此（default 给空 List、css 给 Miss，同一 `x.5:9` 后缀两种结果），而空 List 不是节点集，中链必抛「上游结果不是节点集」；裁决为选择段四态一律 Miss（`tests/engine/reduce.test.ts` 的 `describe('选择段空态裁决统一（分叉①修复）')`）。② 取值段拥有自己的一份空态逻辑（`@text.5:9` 给空 List 而 `.5:9@text` 给 Miss）——已收拢到 `reducePicked` 单点。③ `&&` 用 Miss 冒充「合并失败」——改为抛 `UnsupportedRuleError`（`combine.ts` 的 `UnsupportedRuleError('&& 混合 AllInOne(matches) 二维结果无法合并')`，`tests/engine/combine.test.ts`）。④ `@text!0` 的排除被静默丢弃——排除现已在取值段生效（`select.ts` 的 `getValue` 消费 `reducePicked(arr, seg.exclude, seg.index)`）。
+**被否决的替代方案**：① 选择段切片裁空给空 List——曾如此（default 给空 List、css 给 Miss，同一 `x.5:9` 后缀两种结果），而空 List 不是节点集，中链必抛「上游结果不是节点集」；裁决为选择段四态一律 Miss（`tests/engine/reduce.test.ts` 的 `describe('选择段空态裁决统一（分叉①修复）')`）。② 取值段拥有自己的一份空态逻辑（`@text.5:9` 给空 List 而 `.5:9@text` 给 Miss）——已收拢到 `reducePicked` 单点。③ `&&` 用 Miss 冒充「合并失败」——改为抛 `UnsupportedRuleError`（`combine.ts` 的 `UnsupportedRuleError('&& 混合 AllInOne(matches) 二维结果无法合并')`，`tests/engine/combine.test.ts`）。④ `@text!0` 的排除被静默丢弃——排除现已在取值段生效（`select.ts` 的 `getValue` 消费 `reducePicked(arr, seg.exclude, seg.index)`）。⑤ 中链 jsonpath 用「合并后条目数为零」判 Miss（`evaluate.ts` 旧码 `if (s !== '') items.push(s)` + `items.length === 0 → miss`）——曾如此，它把两种值在同一处折叠两次：上游空 List 被改口成 Miss、命中但值为空串的条目被当失败丢掉，于是链首给空 List 的输入换个链长就变成 Miss，`||` 兜底随链漂移。现按上文「中链 jsonpath 逐项目空态」走（`tests/engine/reduce.test.ts` 的 `describe('中链 jsonpath 逐项目空态…')`）。
 
 ## 取值链文法
 
@@ -57,7 +60,7 @@
 - **位置后缀与排除**：`splitIndexSuffix` 从**最后一个** `.` 起取第一个能解析为 `IndexSpec` 的后缀（`all`/整数/`a:b` 切片，均支持负数）；解析不了则整串是名称（`class.note.clearfix` → arg `note.clearfix`）。`!0:2:-1` 是排除，只对选择段（`default` 选择段与 `css`）合法，且与位置索引**不并存**（解析期抛错）。
 - **位置后缀的落点差异**：`default` 段的位置后缀挂在**名称**上（`class.item.5:9` → 选择 5:9 个 `.item`）；隐式 CSS 回落把后缀带进 `css` 段（`a.0` = 选 `a` 再取第 0 个——真实源高频形态，曾被并进选择器 `a.0` 当 class 选择 → 恒零命中 → 首条书名为空）；显式 `@css:` 形态**没有**位置后缀概念，恒整集（`css.ts` 注释「css 显式形态无位置后缀（恒整集）」）。取值段后缀挂在终端后（`@text.5:9`），与选择段同口径裁决。
 - **排除语法与 JS 段的边界**：排除切分用 `/^(.+?)!(-?\d+(?::-?\d+)*)$/`，只对选择段生效；`js:` 段代码里的 `!0`（布尔取反）在段前缀识别时先行返回，不受影响（`parse.ts` 的 `classifySegment`：`js:` 分支先于 `splitExclude`）。
-- **隐式 CSS 回落**（`parse.ts` 的 `isImplicitCss`）：`#id`/`.class` 简写、裸 tag 词、`tag[attr]`、纯属性选择器、`tag.类` 组合、`tag+伪类/组合链`（首词须是 `HTML_TAGS` 成员）。首词非标签的「词.词」形态（`weirdsyntax.x`、`nonsense:x`）与 default 方言有歧义 → **仍抛错**。
+- **隐式 CSS 回落**（`parse.ts` 的 `isImplicitCss`）：`#id`/`.class` 简写、裸 tag 词、`tag[attr]`、纯属性选择器、`tag.类` 组合、`tag+伪类/组合链`（首词须是 `HTML_TAGS` 成员）、**含选择器特征字符者**（串里有 `#` `[` `>` `+` `~` `=` `,` 任一，或以 `*` 开头——真实源 `ul#ncp3_ul li`、`*[href*=book/chapter]`、`li[style~=width:100%;]`）。这一条放宽的是**「哪串字符像选择器」**：交 `css-select` 求值后，非法选择器仍在求值层抛 `RuleEvalError`（带段定位），只有**合法 CSS 但零命中**才降为 Miss——即「认不出」与「认得但没找到」两种值依旧不折叠（2026-09 审查补记，边界钉在 `tests/engine/parse.test.ts` 的 `it('选择器特征字符 → css 段…')` 与 `it('放宽的边界：无选择器特征的未知串仍在解析期抛…')`）。首词非标签的「词.词」形态（`weirdsyntax.x`、`nonsense:x`）与无特征的未知串（`nonsense span`）与 default 方言有歧义 → **仍抛错**。
 - **构词与解析同属一处**：`normalize` 三个方言分支与 `search-template`/`template` 的 `||` 拆分一律不可自写。`appendTail` 拼串后**用 `parseTails` 回读自校验**（round-trip）：pattern/replacement 含 `##`、与拼接边界 `#` 粘连、追加到 `###` 结尾的 OnlyOne 规则等情况，当场拒绝返回原 rule + warning，由调用方进 `normalize.warnings`。`withImplicitText` 也复用 `jsRegionEnd`，不再按 `||` 盲切 JS 体。
 
 **为什么**：normalize 拼出来的必须正是 parse 认的。此前构词散在三个跨半 module 的硬拼串里，文法一改靠注释同步（已实际分叉：`<js>return a||b</js>` 被撕成 `<js>return a@text||b</js>@text`——正文规则一旦命中即整本书读不出正文且不报错）。
@@ -97,7 +100,7 @@ Native 特有的**隐式终端构词**：`NATIVE_TEXT_FIELDS`（`normalize.ts`�
 
 **为什么**：此前是 `runParsed`/`runParsedSync` 两个约 60 行逐条镜像的孪生函数，特判段（js/put）必须双写，且同步环路长期零测试。**被否决的替代方案**：① 保留双 runner 靠注释同步——已实际分叉；② 让同步驱动器异步化——沙箱宿主桥 `__host_call__` 是同步接口，改不动；③ 遇 js 段在同步环路里返回 Miss——否（用 Miss 冒充失败）。
 
-**段链衔接的显式检查**：`checkChainStart`（`evaluate.ts`）只许 `jsonpath` 与 `allinone` 出现在分支首位；`@get:` 段产出 Value/Miss，是合法的链值替换点（`evaluate.ts` 的 `case 'getvar'`）；`@put:` 是副作用段——写 `ctx.vars` 后链值**透传**（`evaluate.ts` 的 `seg.kind === 'put'` 分支），不替换 `cur`。
+**段链衔接的显式检查**：`checkChainStart`（`evaluate.ts`）只许 `allinone` 出现在分支首位（页级正则无中链语义）。`jsonpath` **中链合法**（上游修复后的 legado 语义——legado-with-MD3 fork 对 JS 返回对象不分发 Mode 的快捷路径是上游已修复的 bug，钉子测试 `AnalyzeRuleFastPathReproTest.kt` 按修复后语义断言）：链首按整页/ctx.json 求值；上游 Value → 按 JSON 解析后求值；上游 List → 逐项求值合并（「js 返回对象数组再取字段」形态）；节点集/正则结果上游 → `RuleEvalError('jsonpath 段上游是节点集/正则结果，无法按 JSON 求值')`（宁炸）。`@get:` 段产出 Value/Miss，是合法的链值替换点（`evaluate.ts` 的 `case 'getvar'`）；`@put:` 是副作用段——写 `ctx.vars` 后链值**透传**（`evaluate.ts` 的 `seg.kind === 'put'` 分支），不替换 `cur`。
 
 **trace 的已知限制**：错误段会先 push 一行 error Step 再抛，而 `evaluateWithTrace` 随错误 reject，调用方拿不到这段部分 trace——只有带段级定位的 typed error 浮出。若「试跑器」需要失败时的部分 trace，`TraceResult` 契约得扩展（例如返回 `{value?, steps, error}` 而不是抛）。
 
@@ -152,27 +155,64 @@ Native 特有的**隐式终端构词**：`NATIVE_TEXT_FIELDS`（`normalize.ts`�
 
 | 测试文件 | 钉死的口径 |
 | --- | --- |
-| `tests/engine/reduce.test.ts` | 取值规约单点：`reducePicked` 四态、选择段/取值段同口径、取值段 `!` 排除生效、「取到空」仍是空 List |
+| `tests/engine/reduce.test.ts` | 取值规约单点：`reducePicked` 四态、选择段/取值段同口径、取值段 `!` 排除生效、「取到空」仍是空 List、中链 jsonpath 的「上游空 List 保持空 List / 命中空串不收进 Miss / 逐项全 Miss 才是 Miss / 空子集不贡献空串条目」 |
+| `tests/engine/content-facet.test.ts` | `text.<串>` 选择语义、属性终端与取值用途（含**命名空间属性名向下兜底不泄漏裸 Error**）、模板字面段（识别/切分/求值/链值引用/**插值 Miss 即整段 Miss**）、`##` 尾 `{{chapter.title}}` 插值、中链 jsonpath |
+| `tests/engine/js-bindings.test.ts` | 沙箱非严格模式（未声明赋值）、`src`/`book`/`chapter` 绑定、**worker 路线自身的逃逸防御与超时**（`require`/`process`/`Function()` 与 `脚本超时（>Nms）` 口径两条路一致） |
 | `tests/engine/select.test.ts` | default 段选择/取值、位置与切片、`text`(后代) vs `ownText`(直系) vs `textAll` vs `textNodes`、块级换行、属性缺失→空 List |
 | `tests/engine/css.test.ts` | `@css` 段在当前节点集内 find、`!` 排除、非法选择器 → `RuleEvalError`(hits=0) |
-| `tests/engine/parse.test.ts` | 切分次序、位置后缀、`!` 识别、大小写不敏感前缀、隐式 CSS 全形态、未知段/裸词解析期抛错、`<js>` 块可非末位、`@js:` 吞链尾 |
+| `tests/engine/parse.test.ts` | 切分次序、位置后缀、`!` 识别、大小写不敏感前缀、隐式 CSS 全形态（含**选择器特征字符放宽与其边界**）、未知段/裸词解析期抛错、`<js>` 块可非末位、`@js:` 吞链尾 |
 | `tests/engine/grammar.test.ts` | `parseTails`/`appendTail` round-trip 自校验与全部越界 warning、`withImplicitText` 不动 JS 区域、`isJsForm`/`splitVarExpr`/`isPureVarExpr` 词法 |
 | `tests/engine/combine.test.ts` | `||` 短路与空 List 继续、`&&` 合并/跳空/多分支 matches 抛错、`%%` 交叉驱动、反序四种值 |
-| `tests/engine/replace.test.ts` | 净化循环替换、OnlyOne 剥 `g`、`$1` 原生语义、替换为空保留条目、非法正则段级定位 |
+| `tests/engine/replace.test.ts` | 净化循环替换、OnlyOne 剥 `g`、`$1` 原生语义、替换为空保留条目、非法正则段级定位、`{{}}` 插值只认 bindings 自有键（`{{toString}}` 等原型链成员保持字面） |
 | `tests/engine/jsonpath.test.ts` | 负下标/负切片从尾数、切片裁空→Miss、空数组→空 List、集合型末段恒 List、属性通配、拒绝过滤器/`@`/`&` |
 | `tests/engine/allinone.test.ts` | 二维 `matches` 不压平、零匹配→空 List（非 Miss）、无捕获组单元素行、零长度匹配不死循环 |
 | `tests/engine/xpath.test.ts` | 谓词按父分组、`//text()` vs `/text()`、末段 `@attr`、`preceding-sibling` **逆文档序**编号、白名单外轴/函数抛错 |
-| `tests/engine/variables.test.ts` | `@put` pairs 手写解析、值引号强制、JSONPath 值路由与 Miss/List 裁决、失败不半截写入 |
+| `tests/engine/variables.test.ts` | `@put` pairs 手写解析、**引号值 = 显式字面量 / 裸值 = JSONPath·键访问·字面回退**（两种写法不互相覆盖）、JSONPath 值路由与 Miss/List 裁决、失败不半截写入、`@get` 只认 `ctx.vars` 自有键（原型链成员名如实 Miss） |
 | `tests/engine/js-sandbox.test.ts` | 逃逸防御（代码生成禁、宿主 realm 不可达、引导入口锁死）、双超时、日志收集、垫片全清单、`jsLib` 先执行且抛错点名 |
 | `tests/engine/js-protocol.test.ts` | 协议表方法名唯一、表↔`SANDBOX_MOUNTS` 完备、分派无 switch |
 | `tests/engine/evaluate-sync-loop.test.ts` | `java.getString*` 真实环路（evaluate → evalJs → evaluateRef → 同步 runner）、子规则含 js 段抛错 |
 | `tests/engine/trace.test.ts` | trace 每段一行、错误段定位（`/段1/`）、独立净化基值（html 原文 / `String(ctx.json)`）、JSON-only 页首段 `@js` 的 result、`evaluate(ParsedRule)` 直通不重 parse、`ctx.json` 缺席回退解析 html |
-| `tests/engine/template.test.ts` / `types.test.ts` / `js-utils.test.ts` / `run-script.test.ts` / `source-session.test.ts` | `{{}}` 插值（含 `encodeURIComponent`）、错误三元定位、`EngineValue → 串` 五分支口径、`runScript` 完成值语义、会话按源隔离 |
+| `tests/engine/template.test.ts` / `types.test.ts` / `js-utils.test.ts` / `run-script.test.ts` / `source-session.test.ts` | `{{}}` 插值（含 `encodeURIComponent`、只认 vars 自有键——原型链成员名保留原文）、错误三元定位、`EngineValue → 串` 五分支口径、`runScript` 完成值语义、会话按源隔离 |
 | `tests/services/error-taxonomy.test.ts` | 引擎三类错误（`UnsupportedRuleError`/`RuleEvalError`/`JsSandboxError`）与抓取两类按 `e.name` 投影成 wire 错误码——错误类**改名即改 wire 码** |
 | `tests/services/normalize.test.ts` | 三方言展平映射、Native 隐式 `@text`、`appendTail` 越界进 warning |
 | `tests/services/search-face.test.ts` / `request.test.ts` / `probe.test.ts` | 搜索面编排、请求组装、探针实测结论——引擎公开面的下游契约 |
 | `tests/compat/replay.test.ts` + `compat/fixtures/demo-site/` | 合成书源在 `@js`/JSONPath/XPath 等形态上的离线全链路回放（分母是 fixture，**不是站点兼容率**） |
 | `tests/packaging-*.test.ts` | 引擎构建产物（`lib/`）能按真实安装链路挂载——引擎改动要能过 `pnpm build` |
+
+## legado 正文链路语义补齐（2026-09 正文审计驱动）
+
+背景：书源注册表 228 源全部 `verified`（探针只验搜索面），但正文链路全量审计（`DSH_CONTENT_AUDIT=1`，`tests/content-audit.test.ts`）实测仅 25 源全通——「搜索可用 ≠ 正文可读」。对照 legado 参考实现（语义清单 `.superpowers/legado-content-facet-semantics.md`，不入库）补齐六条语义，每条都有引擎测试钉子（`tests/engine/content-facet.test.ts`、`tests/engine/js-bindings.test.ts`）：
+
+1. **js 段 scriptForm 口径修正（最大单点）**：链内 `<js>`/`@js:` 段此前走 wrapped async IIFE——无 `return` 的**表达式形态**（legado 主导写法：最后一个表达式即结果）恒产 undefined → Miss，`$.id@js:"…"+result` 这类真实源主导形态整批静默取空。`evaluate.ts` 的 `branchGen` 现对 js 段显式传 `{ scriptForm: true }`（与 `runScript` 缺省一致）。
+2. **沙箱非严格模式 + legado 变量绑定**：wrapper 去掉 `'use strict'`（legado Rhino/QuickJS sloppy 语义——`next = []` 未声明赋值写全局，实测 13+ 源目录脚本首行依赖）；沙箱全局新增 `src`（页面原文，ctx.html ?? String(ctx.json)）、`book`/`chapter`（服务层按面注入 EvalContext）。逃逸防御不靠严格模式（vm realm + codeGeneration 关闭 + 宿主入口锁死），BOOTSTRAP 顶注有完整理由。
+3. **取值用途 + 属性终端**：`parseRule`/`evaluate` 增 `usage` 参数（CONTEXT.md「取值用途」）；取值用途链尾未知提取指令 = HTML 属性名（legado getResultLast else 分支），列表用途链尾未知词仍是选择器。`weirdsyntax.x`（词.词）依旧解析期抛错——宁炸不猜边界不外扩。属性终端的向下兜底**不走 CSS 属性选择器拼串**：`isAttrName` 放行冒号（`xlink:href` 这类命名空间属性名），而 `[xlink:href]` 在 nwsapi 里必炸成逃逸错误分类的裸 Error，故 `select.ts` 的 `attrFallback` 直接遍历后代取第一个含该属性且非空的节点（钉子：`tests/engine/content-facet.test.ts` 的 `属性终端：命名空间属性名`）。
+4. **模板字面段**：`engine/literal.ts` 新模块——`{{expr}}`（JS 表达式 / 规则递归二分）、`{$.path}` 单括号内嵌、`http(s)://` URL 模板段；`branchGen` literal 分支逐段插值（js 部分经沙箱、`{{result}}` 引用链值、`{{page-1}}` 等绑定可见）。**任一字面插值段命中 Miss → 整段 Miss**：插值成空串会拼出语法合法的残 URL（`http://api/novel/{{$.novelId}}` → `http://api/novel/`），拿它发请求比报错更坏——残 URL 可能命中另一本书，而 Miss 会让门面明确失败（钉子见 `tests/engine/content-facet.test.ts` 的 `字面段插值命中 Miss → 整段 Miss`）。空 List 参与拼接时仍是空串：那是「解析到空集合」，不是「取位失败」，两种值不折叠的规矩照旧。
+5. **`text.<串>` 按文本选元素**：legado getElementsContainingOwnText 口径（`select.ts`）。`text.下一页@href`、`text.章节目录@href` 是真实源最高频形态之一，此前参数被忽略 → 整页文本 → 链尾落空。
+6. **`##` 尾插值与中链 jsonpath**：替换 pattern/replacement 里的 `{{chapter.title}}` 等点路径按 bindings（book/chapter/vars/baseUrl）插值（legado makeUpRule：替换规则串同样先插值再当正则）；jsonpath 中链合法化见上节。
+
+**被否决的替代方案**：① 链尾未知词一律按属性终端——否，ruleChapterList 等列表规则的链尾选择器会被打成属性（`id.chapter-list@a` 中的 `a`），usage 轴才分得开；② `{{}}` 插值统一进 search-template 那套预求值——否，插值依赖**链上下文**（`{{result}}`/条目 JSONPath），预求值拿不到；③ 沙箱补 `'use strict'` 安全性——否，严格模式与逃逸防御正交，反而杀掉 legado sloppy 源。
+
+**仍开口（如实）**：`@webjs:`/`sourceRegex`/`webView:true` 属 WebView 面（本插件无头浏览器缺席，legado 本身也只在 URL 带 `webView:true` 时才走 WebView）；`<p1,p2>` URL 页码形态、`contentRule.subContent`/`title` 未实现；方括号索引**多条目**（legado 多区间并集）解析期抛错；jsLib 里用 `eval`/`new Function` 的源仍报 Code generation disallowed（安全边界明确不降级，实测 2 源）。**已解决**（原列此处）：`java.ajax` 同步语义——worker+SAB RPC 桥落地，见下。
+
+**三轮补齐：`java.ajax` 同步语义（worker + SharedArrayBuffer RPC 桥）**：
+legado 的 `java.ajax` 是 runBlocking 同步返回响应 body，Node 主线程 vm 无法阻塞 await——脚本里 `let b = java.ajax(u); b.indexOf(...)` / `java.ajax(url).match(...)` 这类**真实源主导形态**此前整批报 `xxx is not a function`（失败桶内 20 源引用 java.ajax）。实现（`js-sandbox.ts`）：
+- **路由**：`evalJs` 检测代码（含 jsLib）出现 `java.ajax(` → 整段求值进 worker 线程（`new Worker(WORKER_SRC, {eval:true})`——worker 代码以字符串交付，tsdown 打包后无独立 worker 文件可解析；BOOTSTRAP/init/code 全走 workerData，**不产生第二份引导代码抄本**）；无 ajax 脚本仍走主线程零开销。
+- **同步桥**：worker 内 `__host_call__` 把 `(name,argsJson)` 写进请求 SAB → `parentPort.postMessage({rpc:true})` 唤醒主线程 → `Atomics.wait` 阻塞；主线程用**同一个 `call`**（fetch 守门 / `java.getString` 引擎递归 / console 日志 / `__elem.*` 元素桥——全部现成）异步服务，响应 JSON 回写响应 SAB + `Atomics.notify` 唤醒 worker。JS 视角同步拿到 body（bootstrap 的 ajax 包装按 `init.syncAjax` 二选一，同一份代码）。
+- **不变量**：逃逸防御不变（worker 里同一份 BOOTSTRAP + codeGeneration 锁死，SAB 上只流 JSON）；超时双闸（worker 内 vm timeout 杀同步死循环 + 主线程 race 后 `worker.terminate()`），且 **worker 内 vm 超时映射回本仓口径**——跨边界只有 message/stack，`ERR_SCRIPT_EXECUTION_TIMEOUT` 那个 code 留在对端 realm，故按 message 判后抛 `jsTimeoutErr`（否则同一条件在主线程与 worker 两条路上报两种错，2026-09 审查发现）；RPC **帧解析也在 try 内**（畸形长度/坏 JSON 以 `{__error}` 回包让 worker 从 `Atomics.wait` 醒来，不许落在 `void serviceRpc()` 上成 unhandled rejection——那样要挂到外层 race 才 terminate）；宿主失败（如「该源未提供网络能力」）经 `{__error}` 通道回到 worker 以 vm Error 抛出——**与 legado 的差异如实记录**：legado ajax 失败返回异常堆栈**字符串**当 body（脚本继续跑垃圾数据），我们抛错（宁炸不猜优先）。`__elem.*` 元素桥的 cheerio 解析走**单条缓存**（一条 `els.get(i).text().attr()` 链对同一片段发多次宿主操作，逐次全量解析等于 N 遍；不用 Map——键是站点可控的 HTML 串，留清单就是留内存增长口）。
+- 测试钉子：`tests/engine/js-bindings.test.ts`「java.ajax 同步语义（worker + SAB RPC 桥…）」（同步消费 + 链式 `.match` + 失败如实抛）、「worker 路线自身的逃逸防御与超时」（`require`/`process`/`module` 在 worker 里同样不可见、`Function()` 构造抛 `JsSandboxError`、同步死循环报 `脚本超时（>Nms）`；用例靠 fetch 计数自证真走了 worker 那条路，不是主线程用例的复述）；既有 ajax 用例（注入 fetch 可 await / 无 fetch 报网络能力 / 逃逸防御）在 worker 路由下原样通过。
+
+**元素桥与 org.jsoup 补充**（同二/三轮）：`org.jsoup.Jsoup.parse(html)` 以 cheerio 元素包装等价承接（白鹿书院形态：`doc.select(...)`/`.size()`/`.get(i)`/`.text()`/`.attr()` 链可用），其余 `org.*` 仍如实报需要安卓宿主；`java.getElements/getElement` 对 jsonpath/js 的 value/list 产物如实映射条目（此前只认 nodes → JSON 数据面恒空数组）；**JSON 页 `result` 对象绑定**（legado setContent isJSON 口径）：js 段上游是整页/条目且原文是合法 JSON 时，脚本首段 `result` 按**解析后的对象**绑定（`result.chapterTitle`、`result.data.list` 字段访问形态——JSON API 源目录/正文脚本的主导写法；HTML 页仍是元素包装，字符串方法照常）。沙箱 `result` 三态由此收口：JSON 对象 / 元素包装（String 对象）/ 原文字符串，均按「上游是什么」如实绑定。
+
+**二轮补齐（同审计驱动，测试钉子同上两文件 + js-sandbox/variables/allinone 既有套件）**：
+
+1. **元素包装对象**（`js-sandbox.ts` BOOTSTRAP + `__elem.*` 物理通道）：js 段上游是节点集（`resultKind==='nodes'`）或 HTML 页原文（`'page'` 且含标签）时，`result` 被包成 **String 对象**（字符串方法照常：match/replace/模板串），额外挂 `attr(name)`/`text()`/`html()`/`select(rule)`/`toArray()`/`first()`/`size()`——legado JSoup Element/Elements 的最小仿真，宿主侧经 `__elem.*` 用 cheerio 同步求值（与 console.* 同为引导层特判通道，不进协议表——它不是 java.* 面）。`java.getElements/getElement` 返回值同样包成元素包装；且两者对 **jsonpath/js 的 value/list 产物**如实映射条目（此前只认 nodes → JSON 数据面恒空数组）。
+2. **js 数组产物元素字符串化**（`js-sandbox.ts` 的 `serializeJsElement`）：字符串原样、String 对象取原文、带 `html` 字段的对象取 html、其余 JSON.stringify——与 jsonpath 元素口径一致，`<js>java.getElements("$.list[*]")</js>$.name` 这类「js 产条目 → 继续取字段」形态成立。
+3. **cache 垫片**（协议表 `cacheGet/cachePut/cacheDelete` + SANDBOX_MOUNTS.cache）：legado CacheManager 最小仿真（按源隔离进程内键值表）——真实源搜索面 `cache.put`、目录面 `cache.get` 的跨面形态（快看漫画）。
+4. **AES 解密桥**（协议表 `aesBase64DecodeToString` + 引导层 `createSymmetricCrypto(t,k,iv).decryptStr` 链式外壳）：legado 正文解密形态，Node crypto 实现（AES-CBC/ECB + PKCS5/7，key/iv utf8）；密文/密钥不合法 → `JsSandboxError('AES 解密失败…')` 宁炸，`encryptStr` v1 不支持。原先两者都在「需要安卓宿主环境」名单里。
+5. **`@put` 裸值与键访问**（`variables.ts`）：无引号值收（真实源 `@put:{cid:ComicID}`），且按 legado LinkedTreeMap 口径**先按键访问当前 JSON 条目**（`{img:pic}` → `vars.img = 条目.pic`），未命中/非 JSON 上下文 → 字面存。**带引号的值不参与这层推断**（`{img:"pic"}` → `vars.img = 'pic'`）：引号是作者显式表达「我要字面量」的唯一记号，`parsePairs` 第三元把它带到 `evalPut`——丢了它，同一份数据下字面量与键访问两种写法会互相覆盖（2026-09 审查修，钉子「带引号的值是显式字面量」）。豁免只到键访问为止：`$.`/`@json:` 前缀与不支持的规则形态即便带引号仍按声明处理（那是显式语法记号，不是推断）。
+6. **AllInOne 行内标志**（`allinone.ts`）：模式开头 `(?s)`/`(?i)`/`(?si)` 剥离转 JS flags（Java 正则写法，JS 无行内标志——此前直接编译必炸 Invalid group）。
+7. **方括号索引**（`parse.ts` 的 `splitBracketSuffix` + `select.ts` 的 `applyIndex` range 分支）：legado ElementsSingle `[n]` / `[a:b[:c]]`（**闭区间**、负数从尾数、端点越界钳边、step 缺省按方向自动——`[-1:0]` = 整表倒序）/ `[!n…]` 排除；多条目索引解析期抛错（见仍开口）。
+8. **book 变量补字段**（`services/reading.ts`）：`origin`（源 baseUrl——努努书坊 `{{book.origin}}/e/...`）、`tocUrl`、书架上的 `name`/`author`。
 
 ## 已知开口
 
@@ -195,10 +235,10 @@ Native 特有的**隐式终端构词**：`NATIVE_TEXT_FIELDS`（`normalize.ts`�
 **代码内仍开口的**
 
 10. `engine/types.ts` 的 `Facet` 含 `'explore'`，全仓无生产者/消费者（`normalize.ts` 的 `field: 'ruleExplore'` warning）。`engine/combine.ts` 的 `combine`/`combineAnd`/`combineZip` 三处 `loc` 参数都复制了 facet 字面量联合而不是引 `Facet`——加面时四处要改。
-11. `engine/template.ts` 的 `name in vars` 走原型链：`{{toString}}` 会命中继承成员并回报函数源码。正确写法是 `Object.hasOwn`。
-12. `engine/evaluate.ts` 的 `evalNonJs` 里 `case 'allinone'` 与 `case 'getvar'` 不校验链位（只有 `jsonpath`/`allinone` 经 `evaluate.ts` 的 `checkChainStart` 判「必须是分支首位」），但 `allinone` 实际靠 parse 的「整链以 `:` 开头」保证唯一性；`@get:name` 允许出现在链中段并替换链值（`evaluate.ts` 的 `case 'getvar'`）。
-13. `engine/js-protocol.ts` 的 `BridgeDeps.contentBase` 是可变捕获状态：`java.setContent` 写它（`js-protocol.ts` 的 `method('setContent')`：`d.contentBase = …`）、`java.getString*` 读它（`js-protocol.ts` 的 `d.contentBase ?? d.result`）——同一次求值内多次 `setContent` 会互相影响（legado 同款，但未写进任何文档）。
-14. 两项**需要拍板的未决口径**（`AuthRequiredError` 声明未落地、探针「分段 trace」无结构化字段）属服务层与 wire 面——不在本文重复，见 `docs/design/services.md` 的「已知开口」。引擎侧相关事实只有一条：`TraceStep` 目前只被 `evaluateWithTrace` 的生产者内部消费，没有第二个消费者。
-15. `tests/reprobe.test.ts` 是「改动引擎/抓取后实测书源可用率」的唯一自动化验证，默认跳过（`DSH_REPROBE=1` 才跑）；`pnpm test` 全绿不构成真实站点兼容性证据。
-16. 引擎的无回归门禁是「`tests/engine/**` 全绿 + `pnpm typecheck` 干净」两条；`vitest.config.ts` 把 `tests/compat/**` 与 `packaging-build.test.ts` 排除在常规集外（分别由 `pnpm test:compat` / `pnpm test:pack` 驱动）。改引擎后若只跑常规集，`compat` 回放与构建产物两条链是**没被验证**的。
-17. `src/engine/` 19 个文件里只有 `index.ts` 有对外承诺；`parse.ts` 的 `KNOWN_MODES`、`HTML_TAGS` 与 `xpath.ts` 的白名单都是**手写清单**——扩方言时它们不会因为别处改动而自动跟随，测试是唯一守卫。
+11. `engine/evaluate.ts` 的 `evalNonJs` 里 `case 'allinone'` 与 `case 'getvar'` 不校验链位（只有 `allinone` 经 `evaluate.ts` 的 `checkChainStart` 判「必须是分支首位」），但 `allinone` 实际靠 parse 的「整链以 `:` 开头」保证唯一性；`@get:name` 允许出现在链中段并替换链值（`evaluate.ts` 的 `case 'getvar'`）。`jsonpath` 中链已合法化（上游修复后 legado 语义，见「段链衔接的显式检查」）。
+12. `engine/js-protocol.ts` 的 `BridgeDeps.contentBase` 是可变捕获状态：`java.setContent` 写它（`js-protocol.ts` 的 `method('setContent')`：`d.contentBase = …`）、`java.getString*` 读它（`js-protocol.ts` 的 `d.contentBase ?? d.result`）——同一次求值内多次 `setContent` 会互相影响（legado 同款，但未写进任何文档）。
+13. 两项**需要拍板的未决口径**（`AuthRequiredError` 声明未落地、探针「分段 trace」无结构化字段）属服务层与 wire 面——不在本文重复，见 `docs/design/services.md` 的「已知开口」。引擎侧相关事实只有一条：`TraceStep` 目前只被 `evaluateWithTrace` 的生产者内部消费，没有第二个消费者。
+14. `tests/reprobe.test.ts` 是「改动引擎/抓取后实测书源可用率」的唯一自动化验证，默认跳过（`DSH_REPROBE=1` 才跑）；`pnpm test` 全绿不构成真实站点兼容性证据。
+15. 引擎的无回归门禁是「`tests/engine/**` 全绿 + `pnpm typecheck` 干净」两条；`vitest.config.ts` 把 `tests/compat/**` 与 `packaging-build.test.ts` 排除在常规集外（分别由 `pnpm test:compat` / `pnpm test:pack` 驱动）。改引擎后若只跑常规集，`compat` 回放与构建产物两条链是**没被验证**的。
+16. `src/engine/` 20 个文件里只有 `index.ts` 有对外承诺；`parse.ts` 的 `KNOWN_MODES`、`HTML_TAGS` 与 `xpath.ts` 的白名单都是**手写清单**——扩方言时它们不会因为别处改动而自动跟随，测试是唯一守卫。
+17. **`scriptForm` 省缺值两条路不一致**（需要拍板）：worker 路取 `opts?.scriptForm ?? true`（省缺即脚本形态），主线程路取 `opts?.scriptForm === true`（省缺即 wrapped 函数体）——同一个省缺在两条路上语义不同。生产路径不受影响（`evaluate.ts` 的 `branchGen` 对 js 段**显式传 true**，见「js 段 scriptForm 口径修正」），要统一得先定「省缺默认走哪条」并连带核对 `runScript` 与两条路的测试调用点。

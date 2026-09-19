@@ -45,8 +45,11 @@ const SKIP_TAGS = new Set([
 /**
  * 节点子树 → 纯文本：块级边界换行、行内标签只留文本、实体解码、逐行收敛空白（空行不留）。
  * 直接吃 domhandler 节点（cheerio 的活节点，不重新解析）。
+ * `keepImages`（正文面专用，legado HtmlFormatter.formatKeepImg「仅 img 保留」口径）：
+ * `<img src>`（缺 src 取 data-src）输出为独立行的图片地址——漫画/图片章节不再整章零命中。
  */
-export function nodeText(node: AnyNode): string {
+export function nodeText(node: AnyNode, opts?: { keepImages?: boolean }): string {
+  const keepImages = opts?.keepImages === true
   const lines: string[] = []
   let buf = ''
   /** 收当前行：nbsp/全角空格归一为空格、空白折叠、trim；空行不入列 */
@@ -65,6 +68,30 @@ export function nodeText(node: AnyNode): string {
     }
     const el = n as Element
     const tag = el.name.toLowerCase()
+    if (tag === 'img') {
+      if (keepImages) {
+        // legado HtmlFormatter.formatImagePattern 三形态：src / data-src|src / 任意 data-*——
+        // 懒加载漫画站大量只有 data-original/data-echo/data-page-image-url
+        const a = el.attribs ?? {}
+        const src = a.src ?? a['data-src'] ?? a['data-original'] ?? a['data-echo']
+          ?? a['data-url'] ?? a['data-page-image-url'] ?? firstDataAttr(a)
+        if (src.trim() !== '') { flush(); lines.push(src.trim()) }
+      }
+      return // 空元素：无子树
+    }
+    if (tag === 'noscript' && keepImages) {
+      // 懒加载站点把真实 <img> 藏在 <noscript> 里（无 JS 客户端兜底）——SKIP_TAGS 会整棵丢弃，
+      // 正文面 keepImages 口径下要取回它。但 domhandler 把 noscript 内容按 **raw text** 解析
+      // （noscript.children 只有一个 text 节点、find('img') 为 0），直接下钻等于把字面
+      // `<img src="…">` 当正文吐给读者——所以把那层文本再当 HTML 解析一次再走同一套行规约。
+      const raw = el.children.map((c) => (isText(c) ? (c as Text).data : '')).join('')
+      if (raw.trim() === '') return
+      flush()
+      const inner = loadHtml(raw).root().get(0)
+      if (inner !== undefined) visit(inner)
+      flush()
+      return
+    }
     if (SKIP_TAGS.has(tag)) return
     const block = BLOCK_TAGS.has(tag)
     if (block || tag === 'br') flush()                       // 换行点：先收上一行
@@ -89,9 +116,17 @@ export function looksLikeHtml(s: string): boolean {
   return HTML_TAG_RE.test(s)
 }
 
-/** HTML 片段 → 纯文本（块级边界换行） */
-export function htmlToText(html: string): string {
+/** 任意 data-* 属性兜底（legado「任意 data-*」形态：取第一个非空值） */
+function firstDataAttr(attribs: Record<string, string>): string {
+  for (const [k, v] of Object.entries(attribs)) {
+    if (k.startsWith('data-') && v.trim() !== '') return v
+  }
+  return ''
+}
+
+/** HTML 片段 → 纯文本（块级边界换行；keepImages 见 nodeText） */
+export function htmlToText(html: string, opts?: { keepImages?: boolean }): string {
   const $ = cheerio.load(html)
   const root = $.root().get(0)
-  return root === undefined ? '' : nodeText(root)
+  return root === undefined ? '' : nodeText(root, opts)
 }

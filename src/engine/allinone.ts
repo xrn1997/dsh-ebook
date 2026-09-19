@@ -17,15 +17,29 @@ import { RuleEvalError } from './errors.js'
  *   此处不参与。
  * - 零长度匹配强制 `lastIndex++` 前进，防死循环。
  */
+/**
+ * 行内标志前缀（Java/legado 正则写法 `(?s)` / `(?i)` / `(?si)`——JS 无行内标志语法）：
+ * 出现在模式开头时剥掉并转成 JS flags（s=dotAll、i、m、u；其余字符不剥，编译期如实报错）。
+ * 真实源若夏 `:(?s)(\d+)" class="…` 全靠它——此前直接喂 new RegExp 必炸 Invalid group。
+ */
+const INLINE_FLAG_RE = /^\(\?([imsu]+)\)/
+
 export function evalAllInOne(
   seg: Extract<Segment, { kind: 'allinone' }>,
   page: string,
   loc: SegmentLoc,
   facet: Facet,
 ): EngineValue {
+  let pattern = seg.pattern
+  let flags = seg.flags
+  const inline = INLINE_FLAG_RE.exec(pattern)
+  if (inline !== null) {
+    pattern = pattern.slice(inline[0].length)
+    for (const c of inline[1]) if (!flags.includes(c)) flags += c
+  }
   let re: RegExp
   try {
-    re = new RegExp(seg.pattern, seg.flags.includes('g') ? seg.flags : `g${seg.flags}`)
+    re = new RegExp(pattern, flags.includes('g') ? flags : `g${flags}`)
   } catch (e) {
     throw new RuleEvalError(
       `AllInOne 正则非法：${(e as Error).message}（模式: ${JSON.stringify(seg.pattern)}）`,

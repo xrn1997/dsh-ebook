@@ -50,13 +50,16 @@ export interface ReaderSessionState {
   error: { code?: string; message?: string } | null
   /** 待定位章（渲染落地后 settleJump 定位并清零） */
   pendingJump: number | null
+  /** 当前视口所在章（0 基）。**只在跨章时写**——同章滚动继续走防抖落盘，不唤醒渲染；
+   *  消费者是工具栏章进度细线与目录抽屉的「当前章」高亮，都是低频呈现。 */
+  currentChapter: number
 }
 
 type DebouncedSave = ((chapterIndex: number, offsetRatio: number) => void) & { cancel(): void }
 
 export class ReaderSession {
   private readonly store = createStore<ReaderSessionState>({
-    toc: null, chapters: [], loadingIdx: null, error: null, pendingJump: null,
+    toc: null, chapters: [], loadingIdx: null, error: null, pendingJump: null, currentChapter: 0,
   })
   /** 异步回调读最新目录/已载表/锚点（原视图五个「防陈旧闭包」ref 的职责收拢于此） */
   private tocNow: ChapterEntry[] | null = null
@@ -96,7 +99,7 @@ export class ReaderSession {
     this.inflight = null
     this.failedIndex = null
     this.save.cancel()
-    this.store.set({ toc: null, chapters: [], loadingIdx: null, error: null, pendingJump: null })
+    this.store.set({ toc: null, chapters: [], loadingIdx: null, error: null, pendingJump: null, currentChapter: 0 })
     try {
       const toc = await this.deps.fetchToc(sourceId, bookKey)
       this.tocNow = toc
@@ -199,6 +202,7 @@ export class ReaderSession {
     const { chapterIndex, offsetRatio } = locateChapter(this.anchorsNow, this.port.scrollTop())
     if (chapterIndex !== this.lastChapter) {
       this.lastChapter = chapterIndex
+      this.store.set({ currentChapter: chapterIndex })        // 跨章才唤醒渲染（进度细线 + 目录高亮）
       this.deps.saveProgress(chapterIndex, offsetRatio)      // 切章强制存（不等防抖）
     } else {
       this.save(chapterIndex, offsetRatio)                   // 同章滚动：防抖存

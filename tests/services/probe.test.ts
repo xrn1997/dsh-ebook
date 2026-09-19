@@ -26,6 +26,15 @@ describe('probeSource（search 面）', () => {
     expect(r.itemCount).toBe(2)
     expect(r.firstTitle).toBe('斗罗大陆')
   })
+  it('书名规则以属性终端收尾 → 与搜索面同 usage，不误判坏源（2026-09 审查）', async () => {
+    // 标题住在属性里：usage='value' 时链尾未知词是 HTML 属性名，usage='list'（缺省）时
+    // 它是选择器——探针曾漏传该参数，于是搜索面读得出书名的源被报「首条书名为空」的 broken。
+    const html = '<html><body><div class="b"><a href="/book/1/" title="斗罗大陆">进入</a></div></body></html>'
+    const f = createFetcher({ fetchImpl: async () => new Response(html) })
+    const r = await probeSource(src({ ruleBookName: 'tag.a@title' }), f)
+    expect(r.ok).toBe(true)
+    expect(r.firstTitle).toBe('斗罗大陆')
+  })
   it('规则取不到条目 → broken 口径（RuleEvalError 语义：0 命中）', async () => {
     const f = createFetcher({ fetchImpl: async () => new Response('<html></html>') })
     const r = await probeSource(src({ ruleBookList: '@css:.nope' }), f)

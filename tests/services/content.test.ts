@@ -56,4 +56,35 @@ describe('contentToText（正文取值收口）', () => {
     const once = contentToText('<p>一</p><p>二</p>')
     expect(contentToText(once)).toBe(once)
   })
+  // 预转义 HTML 是 JSON API 源正文串的形态，实体解码本就是这层的职责；解出来含标签即违反
+  // 「产物不含标签」契约——reading.getChapter 对缓存还要再收一次口，第二趟会把段落当标签吞掉。
+  it('幂等：预转义 HTML 串一趟收口成纯文本（产物不含标签）', () => {
+    const escaped = '&lt;p&gt;第一段&lt;/p&gt;&lt;p&gt;第二段&lt;/p&gt;'
+    const once = contentToText(escaped)
+    expect(once).toBe('第一段\n第二段')
+    expect(contentToText(once)).toBe(once)
+  })
+  it('img 保留为地址行（漫画/图片章节不再整章零命中）', () => {
+    const html = '<img src="https://cdn.x.com/1.jpg">\n<img data-src="/rel/2.png">'
+    expect(contentToText(html)).toBe('https://cdn.x.com/1.jpg\n/rel/2.png')
+  })
+  it('藏在 noscript 里的 img 也取回地址，不许把字面标签当正文吐出来', () => {
+    // domhandler 把 noscript 内容按 raw text 解析（noscript.children 只有一个 text 节点，
+    // find('img') 为 0）——「透明下钻」必须把那段文本再当 HTML 解析一次，否则读者看到的是
+    // `<img src="/a.jpg">` 这串标记本身（2026-09 审查实测）。
+    expect(contentToText('<p>前<noscript><img src="/a.jpg"></noscript>后</p>')).toBe('前\n/a.jpg\n后')
+    expect(contentToText('<div class="gic"><noscript><img data-original="/b.jpg" /></noscript></div>'))
+      .toBe('/b.jpg')
+  })
+  it('纯文本含预转义实体 → 就地解码（JSON API 源正文串形态）', () => {
+    expect(contentToText('&nbsp;&nbsp;引号&#8220;甲&#8221;&amp;乙')).toBe('\u00a0\u00a0引号“甲”&乙')
+  })
+  it('未知实体原样保留（不猜）', () => {
+    expect(contentToText('甲&unknownentity;乙')).toBe('甲&unknownentity;乙')
+  })
+  it('无实体时零改动（幂等）', () => {
+    const plain = '夜sè将尽，月淡星稀。'
+    expect(contentToText(plain)).toBe(plain)
+    expect(contentToText(contentToText('&nbsp;甲'))).toBe('\u00a0甲')
+  })
 })

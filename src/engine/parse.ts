@@ -1,6 +1,7 @@
-import type { Branch, Facet, IndexSpec, ParsedRule, Segment } from './types.js'
+import type { Branch, Facet, IndexSpec, ParsedRule, RuleUsage, Segment } from './types.js'
 import { UnsupportedRuleError } from './errors.js'
 import { jsRegionEnd, parseTails } from './grammar.js'
+import { isLiteralForm } from './literal.js'
 
 /**
  * parseRule 词法流水线（纯词法：字符串 → ParsedRule AST，零 IO）。
@@ -27,10 +28,10 @@ const COMBINATOR_MAP: Record<CombToken, ParsedRule['combinator']> = {
   '||': 'first', '&&': 'and', '%%': 'zip',
 }
 
-/** 解析期共享状态：facet 用于错误面，counter 是全规则连续段号 */
-interface ParseCtx { facet: Facet; counter: number }
+/** 解析期共享状态：facet 用于错误面，counter 是全规则连续段号，usage 决定链尾未知词语义 */
+interface ParseCtx { facet: Facet; counter: number; usage: RuleUsage }
 
-export function parseRule(rule: string, facet: Facet = 'rule'): ParsedRule {
+export function parseRule(rule: string, facet: Facet = 'rule', usage: RuleUsage = 'list'): ParsedRule {
   // ② 剥 ## 替换尾（含 OnlyOne ###）——文法口 parseTails 单点（grammar.ts：构词与解析同属一处）
   const { chain, replaces, onlyOne } = parseTails(rule)
 
@@ -66,7 +67,7 @@ export function parseRule(rule: string, facet: Facet = 'rule'): ParsedRule {
     seen.size === 1 ? COMBINATOR_MAP[[...seen][0] as CombToken] : 'first'
 
   // ⑤⑥ 段切分与识别
-  const ctx: ParseCtx = { facet, counter: 0 }
+  const ctx: ParseCtx = { facet, counter: 0, usage }
   const branches = parts.map(p => parseBranch(p.text, ctx))
   return { branches, combinator, reverse, replaces, onlyOne }
 }
@@ -171,7 +172,7 @@ function parseBranch(text: string, ctx: ParseCtx): Branch {
     // ⑦ 链尾 (jsCode) 形态：仅对末元素、且该元素不是前缀可识别的特殊段时尝试
     const tail = isLast ? detectTailJs(el) : null
     if (tail) {
-      const xSeg = classifySegment(tail.prefix, ctx)
+      const xSeg = classifySegment(tail.prefix, ctx, false)
       segments.push(xSeg)
       raws.push(tail.prefix)
       ctx.counter++
@@ -181,7 +182,7 @@ function parseBranch(text: string, ctx: ParseCtx): Branch {
       continue
     }
 
-    const seg = classifySegment(el, ctx)
+    const seg = classifySegment(el, ctx, isLast)
     segments.push(seg)
     raws.push(el)
     ctx.counter++
@@ -232,7 +233,7 @@ function splitExclude(el: string): { base: string; exclude: number[] | undefined
   return { base: m[1], exclude: m[2].split(':').map(Number) }
 }
 
-function classifySegment(el: string, ctx: ParseCtx): Segment {
+function classifySegment(el: string, ctx: ParseCtx, isLast: boolean): Segment {
   // 段内前后空白修剪（真实源 `<js>…</js>\n$.[*]` 的段间换行——不 trim 的话 `.` 开头判定全失效）；
   // raws 仍记原文（错误定位不丢原文形态）
   let raw = el.trim()
@@ -258,9 +259,11 @@ function classifySegment(el: string, ctx: ParseCtx): Segment {
     }
     return { kind: 'js', code: raw.slice(4, -5), form: 'inline' }
   }
-  // 其余段：先切 ! 排除，再走 default 识别（含隐式 CSS 回落）
+  // 模板字面段（URL 模板 / {{…}} 插值 / {$.path} 内嵌）——识别判据单点在 engine/literal.ts
+  if (isLiteralForm(raw)) return { kind: 'literal', raw }
+  // 其余段：先切 ! 排除，再走 default 识别（含隐式 CSS 回落、属性终端）
   const { base, exclude } = splitExclude(raw)
-  return classifyDefault(base, exclude, el, ctx)
+  return classifyDefault(base, exclude, el, ctx, isLast)
 }
 
 /** `Json:` 前缀路径归一：真实源有 `Json:data.list`（无 $ 前缀）形态——legado 的 JSONPath
@@ -296,6 +299,11 @@ function isImplicitCss(name: string): boolean {
   if (/^[a-zA-Z][\w-]*(?:\[[^\]]*\])*$/.test(name)) return true
   // 纯属性选择器：[class="col-12 col-md-6"]（无前导标签）
   if (name.startsWith('[') && name.endsWith(']')) return true
+  // 选择器特征字符（真实源 `ul#ncp3_ul li`、`*[href*=book/chapter]`、`a[href*="_"]`、
+  // `li[style~=width:100%;]`）：含 #/[/>+=~ 等即按 CSS 交给 css-select 求值——
+  // 解析不了在求值层如实 RuleEvalError，不再在解析期误报「无法识别的段类型」
+  if (name.startsWith('*')) return true
+  if (/[#[\]>+~=,]/.test(name)) return true
   // tag.类 组合（li.chapter / a.list-group-item）：首词是合法 HTML 标签 → CSS
   const dotIdx = name.indexOf('.')
   if (dotIdx > 0) {
@@ -321,20 +329,82 @@ function splitIndexSuffix(raw: string): { base: string; index: IndexSpec | null 
   return { base: raw, index: null }
 }
 
-function classifyDefault(raw: string, exclude: number[] | undefined, el: string, ctx: ParseCtx): Segment {
+/** 属性名形态（legado getResultLast else 分支：链尾未知提取指令 = HTML 属性名，如 onclick/value/_src）。
+ *  含 `.` 的「词.词」不在此列——nonsense.x 仍按宁炸不猜抛错（doctrine 不变）。 */
+function isAttrName(name: string): boolean {
+  return /^[@a-zA-Z_][-\w:]*$/.test(name)
+}
+
+/** 方括号索引形态（legado ElementsSingle `[it,it,…]` / `[!it,…]`）：`li[-1:0]`、`tag.a[!0]`。
+ *  内容只认整数 / `a:b[:c]` 区间 / 逗号 / `!`（含字母即不匹配——CSS 属性选择器不误伤）。
+ *  v1 口径：单条目（闭区间 + step 自动，负数从尾数）与 `!` 整数排除收；**多条目索引解析期抛错**
+ *  （legado 多区间并集语义未实现——宁炸不猜，不给半截结果）。 */
+const BRACKET_RE = /^(.+?)\[(!?)([-\d:\s,]+)\]$/
+
+function splitBracketSuffix(
+  raw: string, ctx: ParseCtx,
+): { base: string; index: IndexSpec | null; exclude?: number[] } | null {
+  const m = BRACKET_RE.exec(raw)
+  if (m === null) return null
+  const base = m[1]
+  const entries = m[3].split(',').map((s) => s.trim()).filter((s) => s !== '')
+  if (entries.length === 0) return null
+  if (m[2] === '!') {
+    const nums: number[] = []
+    for (const e of entries) {
+      if (!/^-?\d+$/.test(e)) return null // 排除区间形态 v1 不支持 → 交回常规识别（求值层如实报错）
+      nums.push(Number(e))
+    }
+    return { base, index: null, exclude: nums }
+  }
+  if (entries.length > 1) {
+    throw new UnsupportedRuleError('方括号索引多条目 v1 不支持（单条目区间/下标或 !排除 才收）', {
+      facet: ctx.facet, segmentIndex: ctx.counter, segmentRaw: raw,
+    })
+  }
+  const e = entries[0]
+  if (/^-?\d+$/.test(e)) return { base, index: { kind: 'index', value: Number(e) } }
+  const sm = /^(-?\d*):(-?\d*)(?::(-?\d+))?$/.exec(e)
+  if (sm === null || (sm[1] === '' && sm[2] === '')) return null
+  const from = sm[1] === '' ? 0 : Number(sm[1])
+  const to = sm[2] === '' ? Number.MAX_SAFE_INTEGER : Number(sm[2]) // 开放端 → applyIndex 钳到边界
+  const step = sm[3] === undefined ? undefined : Number(sm[3])
+  return { base, index: step === undefined ? { kind: 'range', from, to } : { kind: 'range', from, to, step } }
+}
+
+function classifyDefault(raw: string, exclude: number[] | undefined, el: string, ctx: ParseCtx, isLast: boolean): Segment {
+  // 方括号索引（legado `[a:b]`/`[!0]` 形态）优先于点号后缀：`li[-1:0]` → css `li` + range
+  const bracket = splitBracketSuffix(raw, ctx)
+  const target = bracket === null ? raw : bracket.base
+  const bracketExclude = bracket?.exclude
+  const effExclude = exclude ?? bracketExclude
+
   // 位置后缀：从最后一个 . 起，取第一个能解析为 IndexSpec 的后缀；
   // 都不成立则整串是名称（class.note.clearfix → arg 'note.clearfix'，不许在第一个 . 截断）
-  const { base: name, index } = splitIndexSuffix(raw)
+  const { base: name, index: dotIndex } = splitIndexSuffix(target)
+  const index = bracket?.index ?? dotIndex
 
   const dot = name.indexOf('.')
   const mode = dot === -1 ? name : name.slice(0, dot)
   const arg = dot === -1 ? null : name.slice(dot + 1)
 
   if (KNOWN_MODES.has(mode)) {
-    if (exclude !== undefined && index !== null) {
+    if (effExclude !== undefined && index !== null) {
       throw new UnsupportedRuleError('位置索引与 ! 排除语法不并存（legado 二选一）', { facet: ctx.facet, segmentIndex: ctx.counter, segmentRaw: el })
     }
-    return exclude === undefined ? { kind: 'default', mode, arg, index } : { kind: 'default', mode, arg, index, exclude }
+    return effExclude === undefined ? { kind: 'default', mode, arg, index } : { kind: 'default', mode, arg, index, exclude: effExclude }
+  }
+
+  // 属性终端（CONTEXT.md「属性终端」）：**取值用途 + 链尾**的未知提取指令 = HTML 属性名——
+  // legado AnalyzeByJSoup.getResultLast 的 else 分支 `element.attr(lastRule)`（空值丢弃、去重在求值层）。
+  // 此前这类段（真实源 ruleBookUrl `@onclick`、`_src`、`value`）落进隐式 CSS 按标签选择器求值
+  // → 恒零命中 → Miss → 「搜索能搜到但书目 URL 全空」。列表用途（getElements 口径）链尾未知词
+  // 仍是选择器（css），与 legado ElementsSingle else 分支同口径。
+  if (ctx.usage === 'value' && isLast && isAttrName(name)) {
+    if (effExclude !== undefined && index !== null) {
+      throw new UnsupportedRuleError('位置索引与 ! 排除语法不并存（legado 二选一）', { facet: ctx.facet, segmentIndex: ctx.counter, segmentRaw: el })
+    }
+    return effExclude === undefined ? { kind: 'default', mode: 'attr', arg: name, index } : { kind: 'default', mode: 'attr', arg: name, index, exclude: effExclude }
   }
 
   // 隐式 CSS 回落（官方简写 + 考证：#page/.txt-list/li/a/div[itemscope] 都是选择器）。
@@ -342,11 +412,11 @@ function classifyDefault(raw: string, exclude: number[] | undefined, el: string,
   // 此前被并进选择器 `a.0` 当 class 选择 → 恒零命中 → 首条书名为空）。
   // 无索引时不带 index 字段（AST 精确形态，toEqual 口径）
   if (isImplicitCss(name)) {
-    if (exclude !== undefined && index !== null) {
+    if (effExclude !== undefined && index !== null) {
       throw new UnsupportedRuleError('位置索引与 ! 排除语法不并存（legado 二选一）', { facet: ctx.facet, segmentIndex: ctx.counter, segmentRaw: el })
     }
     const seg: Segment = { kind: 'css', selector: name }
-    if (exclude !== undefined) seg.exclude = exclude
+    if (effExclude !== undefined) seg.exclude = effExclude
     if (index !== null) seg.index = index
     return seg
   }

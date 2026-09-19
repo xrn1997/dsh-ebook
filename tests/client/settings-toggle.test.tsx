@@ -21,7 +21,7 @@ const src: SourcePublic = {
 }
 
 const view = (deps: FakeSettingsDeps): ReactNode =>
-  <SourceList sources={[src]} job={null} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} deps={deps} />
+  <SourceList sources={[src]} job={null} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} onImport={() => {}} deps={deps} />
 
 const checked = (): string | null => screen.getByRole('switch').getAttribute('aria-checked')
 
@@ -29,6 +29,13 @@ beforeEach(() => resetSourceListUi())   // 模块级现场一次复位（先例 
 afterEach(cleanup)
 
 describe('SourceList 启停开关接线（deps seam 驱动）', () => {
+  it('开关挂 .novel-switch 且内含滑块 <i>（外观与位移全在样式层：类一丢就是无底无滑块的裸按钮，且搜不到报错）', () => {
+    render(view(makeDeps()))
+    const sw = screen.getByRole('switch')
+    expect(sw.className).toContain('novel-switch')
+    expect(sw.querySelector('i')).not.toBeNull()
+  })
+
   it('成功路径：点击即乐观翻转（请求未回已是新态），回包后保持', async () => {
     let resolveSend: (v: unknown) => void = () => { /* replaced below */ }
     const deps = makeDeps({ apiSend: vi.fn(() => new Promise((res) => { resolveSend = res })) })
@@ -70,13 +77,63 @@ describe('SourceList 启停开关接线（deps seam 驱动）', () => {
     settle({})
     await waitFor(() => expect(checked()).toBe('false'))
   })
+
+  it('乐观值随服务端值让位：reload 落地即以服务端为准（粘滞乐观态——审查 2026 发现的真缺陷回归钉）', async () => {
+    // 病史：乐观值只在失败时清，成功路径永驻 → 另一入口（selbar 批量停用 / AI 工具）改了
+    // 服务端后，行仍被残留的 optimistic 顶住显示旧态（key={s.id} 稳定，SourceRow 跨 reload 存活）。
+    const deps = makeDeps()                                  // apiSend 缺省成功
+    const off: SourcePublic = { ...src, enabled: false }
+    const panel = (sources: SourcePublic[]): ReactNode =>
+      <SourceList sources={sources} job={null} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} onImport={() => {}} deps={deps} />
+    const { rerender } = render(panel([off]))
+    expect(checked()).toBe('false')                          // 初始：停用
+
+    fireEvent.click(screen.getByRole('switch'))
+    expect(checked()).toBe('true')                           // 乐观翻转：请求未回已是新态
+    await waitFor(() => expect(deps.apiSend).toHaveBeenCalledTimes(1))
+
+    rerender(panel([{ ...off, enabled: true }]))             // reload 落地：服务端确认新态
+    await waitFor(() => expect(checked()).toBe('true'))
+
+    rerender(panel([{ ...off, enabled: false }]))            // 另一入口在服务端停用了它 → reload 再落地
+    await waitFor(() => expect(checked()).toBe('false'))     // 行跟随服务端，不被残留乐观值顶住
+  })
+})
+
+/** 停用 ≠ 免验（2026-09 用户裁定）：停用只摘掉「参与聚合搜索」这一件事——行内验证入口
+ *  按状态出，不随 enabled 消失（病史：`!enabled` 门让停用源既点不动单源验证，又照样出现在
+ *  待办收件箱的批量重验 id 集里，两个入口口径打架）。 */
+describe('SourceList 行内验证入口与启停正交', () => {
+  const panel = (over: Partial<SourcePublic>): { node: ReactNode; deps: FakeSettingsDeps } => {
+    const deps = makeDeps()
+    const node = <SourceList sources={[{ ...src, ...over }]} job={null} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} onImport={() => {}} deps={deps} />
+    return { node, deps }
+  }
+
+  it('停用 + 未验证 → 仍出「验证」钮，点击只验这一源', async () => {
+    const { node, deps } = panel({ enabled: false, status: 'unverified' })
+    render(node)
+    fireEvent.click(screen.getByText('验证'))
+    await waitFor(() => expect(deps.startBatchProbeJob).toHaveBeenCalledWith(['s1']))
+  })
+
+  it('停用 + 坏源 → 仍出「重验」钮（异常还在，停用不是免验理由）', () => {
+    render(panel({ enabled: false, status: 'broken' }).node)
+    expect(screen.getByText('重验')).toBeTruthy()
+  })
+
+  it('已验证的停用源不出验证/重验（钮随状态出，与启停无关）', () => {
+    render(panel({ enabled: false, status: 'verified' }).node)
+    expect(screen.queryByText('验证')).toBeNull()
+    expect(screen.queryByText('重验')).toBeNull()
+  })
 })
 
 /** 分组下拉「未分组」伪选项（增补）：无分组源不属于任何真实组——没有这个入口就定位不到 */
 describe('SourceList 分组下拉「未分组」伪选项', () => {
   const ungrouped: SourcePublic = { ...src, id: 's2', name: '源B', baseUrl: 'https://b.com', groups: [] }
   const renderWith = (sources: SourcePublic[]): HTMLSelectElement => {
-    render(<SourceList sources={sources} job={null} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} deps={makeDeps()} />)
+    render(<SourceList sources={sources} job={null} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} onImport={() => {}} deps={makeDeps()} />)
     return screen.getByLabelText('按分组过滤') as HTMLSelectElement
   }
 

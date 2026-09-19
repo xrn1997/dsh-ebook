@@ -190,16 +190,16 @@ describe('@js 沙箱', () => {
     expect(v3.value.kind).toBe('miss')
   })
 
-  it('getElements：evaluateRef 返回 nodes → 纯数据元素数组（html/text）', async () => {
-    const $ = load('<h1>标题</h1><p>正文</p>')
+  it('getElements：evaluateRef 返回 nodes → 元素包装对象（.text()/.attr()/String()——legado 方法面）', async () => {
+    const $ = load('<h1 class="t">标题</h1><p>正文</p>')
     const fake = (): EngineValue => ({ kind: 'nodes', nodes: $('h1') })
     const v = await run(
-      'const els = java.getElements("@css:h1"); return els.length + "|" + els[0].text + "|" + els[0].html',
+      'const els = java.getElements("@css:h1"); return els.length + "|" + els[0].text() + "|" + String(els[0]) + "|" + els[0].attr("class") + "|" + els[0].attr("href")',
       hostOf(),
       ctxOf(),
       fake,
     )
-    expect(v.value).toEqual({ kind: 'value', text: '1|标题|<h1>标题</h1>' })
+    expect(v.value).toEqual({ kind: 'value', text: '1|标题|<h1 class="t">标题</h1>|t|' })
   })
 
   it('getString(rule, isUrl=true)：v1 守门必炸（宁炸不猜，不静默把 URL 当内容返回）', async () => {
@@ -230,10 +230,10 @@ describe('宿主垫片（真实源用到的缺失 API）', () => {
     expect((await run('return java.encodeURI("书")')).value).toEqual({ kind: 'value', text: '%E4%B9%A6' })
     expect((await run('return java.encodeURI("a b/c")')).value).toEqual({ kind: 'value', text: 'a%20b%2Fc' })
   })
-  it('java.getElement → 首个元素（无命中 → null）', async () => {
+  it('java.getElement → 首个元素包装（无命中 → null）', async () => {
     const $ = load('<h1>标题</h1><p>正文</p>')
     const fake = (): EngineValue => ({ kind: 'nodes', nodes: $('h1') })
-    const v = await run('const e = java.getElement("@css:h1"); return e === null ? "null" : e.text', hostOf(), ctxOf(), fake)
+    const v = await run('const e = java.getElement("@css:h1"); return e === null ? "null" : e.text()', hostOf(), ctxOf(), fake)
     expect(v.value).toEqual({ kind: 'value', text: '标题' })
     const miss = (): EngineValue => ({ kind: 'miss', detail: 'x' })
     const v2 = await run('return java.getElement("@css:none") === null ? "null" : "x"', hostOf(), ctxOf(), miss)
@@ -268,11 +268,26 @@ describe('宿主垫片（真实源用到的缺失 API）', () => {
     expect((await run('return java.timeFormatUTC(0)')).value).toEqual({ kind: 'value', text: '1970/01/01 00:00' })
     expect((await run('return java.hexDecodeToString("e4bda0")')).value).toEqual({ kind: 'value', text: '你' })
   })
-  it('无法仿真的安卓宿主 API（webView/crypto/android.*）→ 如实报不支持（不静默 no-op）', async () => {
+  it('无法仿真的安卓宿主 API（webView/android.*）→ 如实报不支持（不静默 no-op）', async () => {
     const err = await run('return java.webView("<p/>", "https://a.com", "")').then(() => null, (e) => e)
     expect(String(err.message)).toMatch(/不支持|未知/)
-    const err2 = await run('return java.createSymmetricCrypto("AES", "k", "iv")').then(() => null, (e) => e)
-    expect(String(err2.message)).toMatch(/不支持|未知/)
+  })
+  it('AES 解密桥（legado createSymmetricCrypto().decryptStr / aesBase64DecodeToString——Node crypto 实现）', async () => {
+    const crypto = await import('node:crypto')
+    const key = '0123456789abcdef'
+    const cipher = crypto.createCipheriv('aes-128-cbc', Buffer.from(key, 'utf8'), Buffer.from(key, 'utf8'))
+    const b64 = Buffer.concat([cipher.update(Buffer.from('你好章节', 'utf8')), cipher.final()]).toString('base64')
+    const v = await run(
+      `return java.createSymmetricCrypto("AES/CBC/PKCS5Padding","${key}","${key}").decryptStr("${b64}")`,
+    )
+    expect(v.value).toEqual({ kind: 'value', text: '你好章节' })
+    const v2 = await run(`return java.aesBase64DecodeToString("${b64}","${key}","AES/CBC/PKCS5Padding","${key}")`)
+    expect(v2.value).toEqual({ kind: 'value', text: '你好章节' })
+    // 密文/密钥不对 → 如实报 AES 解密失败（宁炸，不返回假明文）；encryptStr v1 不支持
+    const err = await run('return java.aesBase64DecodeToString("AAAA","0123456789abcdef","AES/CBC/PKCS5Padding","0123456789abcdef")').then(() => null, (e) => e)
+    expect(String(err.message)).toMatch(/AES 解密失败/)
+    const err2 = await run(`return java.createSymmetricCrypto("AES/CBC/PKCS5Padding","${key}","${key}").encryptStr("x")`).then(() => null, (e) => e)
+    expect(String(err2.message)).toMatch(/不支持/)
   })
   it('source.getVariable/setVariable 垫片（按源隔离——真实源存自定义域名的形态）', async () => {
     const ctx = ctxOf()

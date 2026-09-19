@@ -16,4 +16,9 @@ describe('URL 模板插值', () => {
   it('特殊字符做 URI 编码', () => {
     expect(interpolateUrl('/s?q={{key}}', { key: 'a b&c' })).toBe('/s?q=a%20b%26c')
   })
+  it('原型链成员名保留原文（`in` 走原型链会把 Object.prototype 成员当变量值）', () => {
+    expect(interpolateUrl('/s?k={{toString}}', {})).toBe('/s?k={{toString}}')
+    expect(interpolateUrl('/s?k={{constructor}}', {})).toBe('/s?k={{constructor}}')
+    expect(interpolateUrl('/s?k={{__proto__}}', {})).toBe('/s?k={{__proto__}}')
+  })
 })

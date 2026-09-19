@@ -53,7 +53,7 @@ export async function fetchSearchPage(
     { trimFirstPage: isNativeSource(source.raw) })
   const { text, landedUrl } = await fetchTextPage(fetcher, plan.url,
     { ...fetchInitOf(plan, headerOf(source)), timeoutMs }, plan.charset)
-  const items = extractItems(await subEval(ruleBookList, { html: text, baseUrl: landedUrl }, 'search'))
+  const items = extractItems(await subEval(ruleBookList, { html: text, baseUrl: landedUrl }, 'search', 'list'))
   return { ok: true, items, landedUrl, subEval }
 }
 

@@ -54,6 +54,22 @@ _Avoid_: 步骤
 链上空态裁决口径（**取位失败 → Miss；解析到空集合 → 空 List**）。Miss = 失败：选择零命中 / 排除后空 / 下标越界 / 切片裁空——链中穿透；空 List = 合法零条目：元素在而取值全空，或键存在且值为空数组。选择段（default/css）与取值段（getValue）的取位/空态裁决唯一实现在 `engine/select.ts` 的 `reducePicked`（zero/excluded/oob/sliced 四态皆「取位失败」）；取值段的「元素在、取值全空 → 空 List」住 `getValue`。JSONPath（`engine/jsonpath.ts`）同口径：零命中/越界/切片裁空 → Miss，空数组 → 空 List；下标与切片均支持负数从尾数（与 `select.applyIndex` 一致）。
 _Avoid_: 空结果（太泛——Miss 与空 List 是两种值）
 
+**取值用途（rule usage）**:
+同一条规则串在两种用途下**链尾未知词**语义不同，调用方按用途显式声明（`evaluate`/`SubRuleEval` 的 `usage` 参数，缺省 `'list'`）：`'value'`（legado getString 口径）链尾未知提取指令 = **HTML 属性名**（属性终端）；`'list'`（legado getElements 口径）链尾未知选择器 = **CSS**。唯一实现在 `engine/parse.ts` 的 `classifyDefault`（`ctx.usage === 'value' && isLast && isAttrName(name)`）。
+_Avoid_: 模式、场景（太泛——这是「链尾未知词」的裁决轴）
+
+**属性终端（attr terminal）**:
+取值用途链尾的未知提取指令按 HTML 属性名取值（legado AnalyzeByJSoup.getResultLast 的 `else -> element.attr(rule)`）：自身属性为空向下兜底第一个含该属性的后代（html/body 包装不兜底），空值丢弃 + 去重。唯一实现在 `engine/select.ts` 的 `getValue` `mode === 'attr'` 分支。真实源 `ruleBookUrl: tag.div@onclick`、`@value`、`@_src` 全靠它。
+_Avoid_: 自定义属性（太泛——这是链尾语义，不是属性语法）
+
+**模板字面段（literal segment）**:
+规则段里出现 `{{expr}}`（JS 表达式或规则递归——以 `@`/`$.`/`$[`/`//` 开头按规则求值）、`{$.path}`（单括号 JSONPath 内嵌）或 `http(s)://` URL 模板 → 整段是字面模板：插值后产出 Value（legado SourceRule 的 `else -> rule` 字面返回 + makeUpRule 插值）。识别与切分唯一实现在 `engine/literal.ts`（`isLiteralForm`/`splitLiteral`，`{{}}` 平衡括号感知）；求值在 `engine/evaluate.ts` 的 `branchGen` literal 分支（js 部分经沙箱、`{{result}}` 引用链值）。
+_Avoid_: URL 规则（太泛——不只 URL，任何含插值的字面段都是）
+
+**按文本选元素（text selection）**:
+默认方言 `text.<串>`（**带参数**）= 选择段：命中「直系文本包含该串」的元素（legado getElementsContainingOwnText；`ownText.<串>` 对称取「后代文本包含」）。不带参数的 `text` 才是取值终端（全部后代文本）。唯一实现在 `engine/select.ts` 的 `evalDefault` textContaining 分支。真实源 `text.下一页@href`、`text.章节目录@href` 全靠它。
+_Avoid_: 文本过滤（太泛——判据是「含文本的元素」，链上位置是选择段）
+
 **探针（probe）**:
 对一个书源真发一次搜索请求，得出可用性实测结论。
 _Avoid_: 自测、健康检查
@@ -72,6 +88,11 @@ _Avoid_: URL 去重
 停用的书源不参与聚合搜索；探针与试跑不受影响。停用不等于删除。
 _Avoid_: 删除、隐藏
 
+**书源待办（source inbox）**:
+书源管理 tab 的首屏任务面：全库源清单派生出的「坏源 / 未验证」两集合，反常置顶成任务卡（处置动作：批量重验 / 一键验证），任务收尾自动消解。待办**只看状态、不看启停**（停用只是不参与聚合搜索，停用的坏源/未验证照样置顶——停用 ≠ 免验）；加载失败不渲染待办（不拿未知当「全部良好」）。
+_Implementation_: `src/client/source-inbox.ts`（派生）+ `src/client/views/SettingsSection.tsx`（`SourceInbox` 渲染）
+_Avoid_: 舰队快照（黑话，已否决）、状态总览 chips（读数与过滤混杂，已退役）
+
 **bookKey**:
 书籍身份：详情页 URL；本地书为 `local:<uuid>`。
 _Avoid_: id、url（太泛）
@@ -87,9 +108,9 @@ _Avoid_: 队列（不是队列，是单槽）
 「目录 → 存档恢复 → 逐章懒加载 → 预取 → 进度落盘」的时序编排持有者（client/reader-session.ts）；DOM 测量经 ReaderPort 注入，视图只渲染与接线。
 _Avoid_: 阅读器状态管理（视图里的 state 只是它的投影）
 
-**判到底（翻页三闸）**:
-「下一页 / 下一目录页」何时停的唯一语义，唯一实现 `services/pagination.ts` 的 `followPages`（`stoppedBy` 五态）。次序钉死：**回环闸**（本页出现已见过的条目 → 软 404 防御，判到底）→ **零新增闸**（提取 0 条 → 空页之后的页不可信，不追 next）→ **上限闸**（`maxPages`：目录 200 / 正文 50）。正文面另加**串章闸**（末页「下一页」常指向下一章，`services/chapter-page.ts` 的 `isSameChapterPage` 判不准时宁漏页不串章）。
-_Avoid_: 翻页循环、重复过滤（太泛——判据是「出现重复条目」，不是「页空了」）
+**判到底（翻页闸）**:
+「下一页 / 下一目录页」何时停的唯一语义，唯一实现 `services/pagination.ts` 的 `followPages`（`stoppedBy` 五态）。next 规则按**列表语义**求值（legado getStringList(isUrl=true)）：1 个候选链式跟进（每页继续求值 next）；多个候选全部抓取但**不递归翻页**（legado getNextPageUrl=false）。停止判据次序：**URL 防环**（候选地址已抓过不入队，legado nextUrlList 口径）→ **零新增闸**（本页提取 0 条 → 空页之后的页不可信）→ **回环闸**（本页有条目但 0 新增——整页全是见过的条目 = 到底/软404；**部分重复不停**，legado 目录翻页只按 URL 防环、条目去重，站点页间重叠是常态）→ **上限闸**（`maxPages`：目录 200 / 正文 50）。正文面串章闸：候选「下一页」== 目录里**其他章节 URL** → 停（legado「下一页 == 下一章 URL 即 break」的正判据，`stopUrls` 目录知识）；无目录知识时才回退路径启发式（`services/chapter-page.ts` 的 `isSameChapterPage`，判不准时宁漏页不串章）。
+_Avoid_: 翻页循环、重复过滤（太泛——判据是「本页零新增」与「URL 已见」，不是「出现重复就停」）
 
 **单在途槽（reader session）**:
 阅读会话同一时刻只允许一个章节加载在途（`inflight`）；滚动风暴与目录直达都只记意图（`pendingJump`），在途释放后由 `settlePendingLoad()` 补拉（否则那次点击无声消失）。刚失败过的同一章不自动重试——等用户点「重试」。唯一实现 `client/reader-session.ts`。

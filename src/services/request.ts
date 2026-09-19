@@ -136,19 +136,45 @@ export function fetchInitOf(
   return init
 }
 
-/** URL 尾部的 `,{"webView":true}` 选项后缀剥离（章节/下一页 URL 常带——legado 嗅探语义；
- *  我们不支持 WebView，但剥掉后缀让普通请求照常尝试，而不是 URL 解析必炸）。
- *  只认「逗号 + 完整 JSON 对象收尾」形态，正文中 `{a,b}` 不误剥。 */
-export function stripUrlOption(href: string): string {
+/** URL 尾部 `,{option}` 后缀切分（章节/下一页 URL 常带——legado 嗅探语义）。
+ *  只认「逗号 + 完整 JSON 对象收尾」形态（严格 JSON 或单引号形态），正文里的 `{a,b}` 不误剥。
+ *  `suffix` 是**原文**（含逗号），绝对化后原样接回——选项语义由 assembleRequest 在抓取时解释。 */
+export function splitUrlOption(href: string): { url: string; suffix: string | null } {
   const m = OPTION_SPLIT.exec(href)
-  if (m === null) return href
+  if (m === null) return { url: href, suffix: null }
   const tail = href.slice(m.index + m[0].length).trim()
-  if (!tail.startsWith('{') || !tail.endsWith('}')) return href
-  try {
-    const v = JSON.parse(tail) as unknown
-    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return href.slice(0, m.index).trimEnd()
-  } catch { /* 非 JSON → 原样 */ }
-  return href
+  if (!tail.startsWith('{') || !tail.endsWith('}')) return { url: href, suffix: null }
+  const objOf = (t: string): unknown => {
+    try { return JSON.parse(t) as unknown } catch { return undefined }
+  }
+  const v = objOf(tail) ?? objOf(tail.replace(/'/g, '"'))
+  if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+    return { url: href.slice(0, m.index).trimEnd(), suffix: href.slice(m.index) }
+  }
+  return { url: href, suffix: null }
+}
+
+/** URL 尾部的 `,{"webView":true}` 选项后缀剥离（兼容入口——语义即 splitUrlOption().url）。
+ *  我们不支持 WebView，但抓取层会按普通请求带选项照常尝试（assembleRequest 解释其余选项）。 */
+export function stripUrlOption(href: string): string {
+  return splitUrlOption(href).url
+}
+
+/** 绝对化并保留选项后缀（章节/下一页 URL 的组装口径——legado BookChapter.getAbsoluteURL：
+ *  URL 部分按 baseUrl 绝对化，`",{option}"` 接回）。此前先 strip 再绝对化 → POST/charset
+ *  选项在目录落库时被丢弃，API 型章节端点（POST body 模板）全部退化成裸 GET。 */
+export function absUrlKeepOption(href: string, base: string): string | null {
+  const { url, suffix } = splitUrlOption(href)
+  const abs = absUrl(url, base)
+  if (abs === null) return null
+  return suffix === null ? abs : abs + suffix
+}
+
+/** 比对口径（串章闸/防环）：剥选项后缀 → URL 归一化（new URL().href）；解析失败回原文。
+ *  目录章地址与「下一页」候选都过这一层再比对——选项/编码差异不参与判等。 */
+export function canonUrl(u: string, base?: string): string {
+  const { url } = splitUrlOption(u)
+  try { return new URL(url, base).href } catch { return url }
 }
 
 /** 搜索面入口（历史名字保留）：assembleRequest 的搜索专用薄壳 */

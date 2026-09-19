@@ -18,7 +18,7 @@ import { followPages } from './pagination.js'
 import type { FollowResult } from './pagination.js'
 import { probeSource } from './probe.js'
 import type { ProbeResult } from './probe.js'
-import { stripUrlOption } from './request.js'
+import { absUrlKeepOption, assembleRequest, canonUrl, fetchInitOf, stripUrlOption } from './request.js'
 import { fetchSearchPage, searchErrorCodeOf } from './search-face.js'
 import { Shelf } from './shelf.js'
 import { SourceRegistry } from './sources.js'
@@ -391,7 +391,7 @@ export class ReadingService {
         // 求值与相对链接基准 = 落地地址（浏览器语义，与目录/正文面同口径——重定向站点不再错位）
         const ctx = { html: item, baseUrl: page.landedUrl }
         // ruleBookName 的非空保障在搜索面（缺规则整体 RuleMissing，不降级 `?? ''`——空串规则返回整页文本会造垃圾标题）
-        const title = firstValue(await page.subEval(s.rules.ruleBookName ?? '', ctx, 'search'), 'search')
+        const title = firstValue(await page.subEval(s.rules.ruleBookName ?? '', ctx, 'search', 'value'), 'search')
         if (title === null || title.trim() === '') continue // 书名非空才算书目
         const [author, href, cover, intro, last] = await Promise.all([
           fieldOf(page.subEval, s.rules.ruleAuthor, ctx, 'search'),
@@ -417,7 +417,8 @@ export class ReadingService {
 
   async getDetail(sourceId: string, url: string): Promise<BookDetail> {
     const s = this.requireSource(sourceId)
-    const subEval = makeSubEval(this.fetcher, s)
+    // legado `book` 变量：详情面规则常见 `book.bookUrl`/`book.origin` 引用（脚本/模板段）
+    const subEval = makeSubEval(this.fetcher, s, { book: { bookUrl: url, origin: s.baseUrl } })
     const html = await this.fetchText(s, url)
     const ctx = { html, baseUrl: url }
     // 详情面上下文优先 ruleDetail*（对象方言 ruleBookInfo——与搜索条目上下文实测 508/541 不同）；
@@ -440,7 +441,7 @@ export class ReadingService {
 
   // ── 目录 ─────────────────────────────────────────────────────────────
 
-  /** 目录：缓存优先（refresh 跳过）+ in-flight 去重（同书并发只拉一次）+ 三闸跟进。
+  /** 目录：缓存优先（refresh 跳过）+ in-flight 去重（同书并发只拉一次）+ 翻页闸跟进。
    *  本地书分流在门面内：sourceId=__local__ 走本地书面——
    *  dispatch 不再持 LOCAL 分流知识，localToc/localChapter 收为私有 */
   getToc(sourceId: string, bookUrl: string, opts?: { refresh?: boolean }): Promise<ChapterEntry[]> {
@@ -469,18 +470,37 @@ export class ReadingService {
       throw new RuleMissingError('toc', 'ruleChapterList/ruleBookList',
         `源「${s.name}」缺目录规则（ruleChapterList/ruleBookList 之一 + ruleChapterName/ruleChapterUrl）——无法构建目录`)
     }
-    const subEval = makeSubEval(this.fetcher, s)
+    // legado `book` 变量：目录规则常见 `book.bookUrl`（36小说网 chapterUrl）与 `book.origin`
+    // （努努书坊 ruleTocUrl `{{book.origin}}/e/...`——源站点域名即注册表 baseUrl）
+    const subEval = makeSubEval(this.fetcher, s, { book: { bookUrl, origin: s.baseUrl, tocUrl: bookUrl } })
     const tocUrl = await tocUrlOf(s.rules.ruleTocUrl, bookUrl, () => this.fetchText(s, bookUrl), subEval)
     const extract = async (page: Page): Promise<ChapterEntry[]> => {
-      const listV = await subEval(listRule, { html: page.body, json: page.json, baseUrl: page.url }, 'toc')
+      const listV = await subEval(listRule, { html: page.body, json: page.json, baseUrl: page.url }, 'toc', 'list')
       const out: ChapterEntry[] = []
+      let fellBack = 0
       for (const item of extractItems(listV)) {
         const ctx = { html: item, baseUrl: page.url }
-        const name = firstValue(await subEval(ruleChapterName, ctx, 'toc'), 'toc')
-        const href = firstValue(await subEval(ruleChapterUrl, ctx, 'toc'), 'toc')
-        // 章节 URL 常带 `,{"webView":true}` 选项后缀（legado 嗅探语义）——剥掉后缀让普通请求照常尝试
-        const url = href === null ? null : absUrl(stripUrlOption(href), page.url)
-        if (name !== null && url !== null) out.push({ name, url })
+        const name = firstValue(await subEval(ruleChapterName, ctx, 'toc', 'value'), 'toc')
+        const href = firstValue(await subEval(ruleChapterUrl, ctx, 'toc', 'value'), 'toc')
+        // 章节 URL 常带 `,{"webView":true}` 等选项后缀（legado 嗅探语义）——**保留后缀落库**，
+        // 抓取时由 fetchPage → assembleRequest 解释（POST/charset/headers 选项不再被丢弃）；
+        // URL 取不到时 legado 回退目录页地址（BookChapterList「未获取到url,使用baseUrl替代」）——
+        // 不再整条丢弃（此前「url null → 跳过」把整站目录清成 0 章）
+        const missing = href === null || href.trim() === ''
+        const url = href !== null && href.trim() !== '' ? absUrlKeepOption(href, page.url) : page.url
+        if (name !== null && url !== null) {
+          if (missing) fellBack++
+          out.push({ name, url })
+        }
+      }
+      // 逐章回退服务的是「个别条目缺链接」；**每一条都回退**就不是缺链接，而是 ruleChapterUrl
+      // 整体失效——静默产出 N 条指向目录页自身的 toc 等于拿合法形状冒充成功（本仓镜像的
+      // 宁炸不猜），且正文面每次都在目录页上求值，读者只看到「点开没内容」。
+      if (out.length > 0 && fellBack === out.length) {
+        throw new RuleEvalError(
+          `目录 URL 规则未取到任何章节地址（段 ruleChapterUrl: ${ruleChapterUrl}；${out.length} 条全部回退目录页 ${page.url}）`,
+          { facet: 'toc', segmentIndex: 0, segmentRaw: ruleChapterUrl, hits: 0 },
+        )
       }
       return out
     }
@@ -526,9 +546,21 @@ export class ReadingService {
       throw new RuleMissingError('content', 'ruleContent', `源「${s.name}」缺正文规则 ruleContent`)
     }
     const target = toc[chIndex]
-    const subEval = makeSubEval(this.fetcher, s)
+    // legado 变量注入：`book`（bookUrl/name…——36小说网 ruleChapterUrl 用 book.bookUrl.replace）
+    // 与 `chapter`（title/index/url——正文脚本 `chapter.title` 广泛使用）
+    const shelfBook = this.shelf.get(bookKey)
+    const subEval = makeSubEval(this.fetcher, s, {
+      book: {
+        bookUrl: bookKey,
+        origin: s.baseUrl,
+        tocUrl: bookKey,
+        ...(shelfBook?.title === undefined ? {} : { name: shelfBook.title }),
+        ...(shelfBook?.author === undefined ? {} : { author: shelfBook.author }),
+      },
+      chapter: { title: target.name, index: chIndex, url: target.url, baseUrl: target.url },
+    })
     const extract = async (page: Page): Promise<string[]> => {
-      const v = await subEval(ruleContent, { html: page.body, json: page.json, baseUrl: page.url }, 'content')
+      const v = await subEval(ruleContent, { html: page.body, json: page.json, baseUrl: page.url }, 'content', 'value')
       const text = firstValue(v, 'content')
       if (text === null) {
         throw new RuleEvalError('正文规则没取到内容', {
@@ -560,7 +592,12 @@ export class ReadingService {
       this.cfg.contentMaxPages,
       'content',
       subEval,
-      { sameChapterBase: target.url },   // 串章闸：`.prenext` 类「下一页」常指向下一章，见 chapter-page.ts
+      {
+        // 串章闸（legado 口径）：候选「下一页」== 目录里其他章节 URL → 到底。
+        // 目录知识是正判据——路径启发式会把 `?id=..&cid=..&page=2` 这类非页码键分页误判成串章
+        // （「一章只解析出一页」的根因之一）；启发式仅在无目录知识时兜底（见 pagination.ts）
+        stopUrls: new Set(toc.map((c) => canonUrl(c.url)).filter((u) => u !== canonUrl(target.url))),
+      },
     )
     const text = result.items.join('\n')
     await this.cache.setContent(sourceId, bookKey, chIndex, text)
@@ -574,7 +611,7 @@ export class ReadingService {
 
   /**
    * next 规则短路：null → 单页提取（无翻页发现能力，直接 end）；
-   * 非 null → 走三闸 followPages。followPages 收到的 nextRule 永远非空。
+   * 非 null → 走翻页闸 followPages。followPages 收到的 nextRule 永远非空。
    */
   private async followOrSingle<T>(
     startUrl: string,
@@ -585,7 +622,7 @@ export class ReadingService {
     maxPages: number,
     facet: Facet,
     subEval: SubRuleEval,
-    followOpts?: { sameChapterBase?: string },
+    followOpts?: { sameChapterBase?: string; stopUrls?: Set<string> },
   ): Promise<FollowResult<T>> {
     if (nextRule === null) {
       const page = await fetchPage(startUrl)
@@ -600,10 +637,14 @@ export class ReadingService {
     return s
   }
 
+  /** 抓取一页：URL 可带 `,{option}` 选项后缀（章节/下一页/目录 URL 的 legado 嗅探语义）——
+   *  选项语义走 assembleRequest 单点（POST method/body、charset、headers 全在此解释），
+   *  charset 声明进解码链（优先级最高）。webView 选项不支持——按普通请求照常尝试（如实）。 */
   private async fetchPage(s: NovelSource, url: string): Promise<Page> {
-    const page = await this.fetcher.fetchPage(url, { headers: headerOf(s) })
+    const plan = assembleRequest(url, {}, s.baseUrl)
+    const page = await this.fetcher.fetchPage(plan.url, fetchInitOf(plan, headerOf(s)))
     // url = 落地地址（相对链接基准，浏览器语义）；requestedUrl 仅诊断用（被跳转走时报错点名）
-    return { url: page.finalUrl, requestedUrl: url, body: decodeBody(page) }
+    return { url: page.finalUrl, requestedUrl: plan.url, body: decodeBody(page, plan.charset) }
   }
 
   /** fetchText：抓取+解码+超时委托 fetcher.fetchTextPage（超时单点；POST 选项形态由 search-face 编排） */
@@ -626,7 +667,7 @@ export async function tocUrlOf(
   }
   const html = await detailHtml()
   if (html === null) return bookUrl
-  const v = await subEval(ruleTocUrl, { html, baseUrl: bookUrl }, 'detail')
+  const v = await subEval(ruleTocUrl, { html, baseUrl: bookUrl }, 'detail', 'value')
   return absUrl(firstValue(v, 'detail'), bookUrl) ?? bookUrl
 }
 
@@ -652,12 +693,12 @@ function createFetcherWith(fetchImpl?: typeof globalThis.fetch, proxyUrl?: strin
   })
 }
 
-/** 字段子规则求值 + 规约：rule null → null（源没这条信息） */
+/** 字段子规则求值 + 规约：rule null → null（源没这条信息）。usage 缺省 'value'——字段规则都是取值用途 */
 async function fieldOf(
   subEval: SubRuleEval, rule: string | null, ctx: { html: string; baseUrl: string }, facet: Facet,
 ): Promise<string | null> {
   if (rule === null) return null
-  return firstValue(await subEval(rule, ctx, facet), facet)
+  return firstValue(await subEval(rule, ctx, facet, 'value'), facet)
 }
 
 function errorMessageOf(e: unknown): string {

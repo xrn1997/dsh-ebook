@@ -12,7 +12,8 @@ export function filterSources(sources: SourcePublic[], query: string): SourcePub
     || s.groups.some((g) => g.toLowerCase().includes(q)))
 }
 
-/** 状态 chips 过滤：五维单选，与文本过滤交集（先 filterByStatus 再 filterSources）。
+/** 状态下拉过滤：五维单选，与文本过滤交集（先 filterByStatus 再 filterSources）。
+ *  读数职责已归待办箱（`source-inbox.ts`），下拉不带计数——旧状态 chips 随改版退役。
  *  'disabled' 维度是 enabled 布尔而非 status——停用与坏源是两个正交维度。 */
 export type StatusFilter = 'all' | 'verified' | 'broken' | 'unverified' | 'disabled'
 
@@ -28,8 +29,8 @@ export function filterByStatus(sources: SourcePublic[], filter: StatusFilter): S
 export const UNGROUPED = '__ungrouped__'
 
 /** 分组过滤：'' = 全部（含无分组源——不过滤即全量）；精确匹配分组名，
- *  与状态 chips/文本过滤叠加（交集）；UNGROUPED 哨兵 = 只看无分组源。
- *  分组名五花八门不做 chips——下拉单选收敛宽度；v1 不做多组并筛（宁窄不宽） */
+ *  与状态下拉/文本过滤叠加（交集）；UNGROUPED 哨兵 = 只看无分组源。
+ *  分组只出下拉单选（真实组名五花八门，做 chips 收不住宽度）；v1 不做多组并筛（宁窄不宽） */
 export function filterByGroup(sources: SourcePublic[], group: string): SourcePublic[] {
   if (group === '') return sources
   if (group === UNGROUPED) return sources.filter((s) => s.groups.length === 0)

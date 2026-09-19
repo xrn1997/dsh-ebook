@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { batchConfirmKind, collectIdsByStatus, TYPED_CONFIRM_THRESHOLD } from '../../src/client/source-batch.js'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -177,6 +176,13 @@ describe('styles token 迁移', () => {
       .replace(/\.novel-dark \{[\s\S]*?\n\}/, '')
     expect(stripped).not.toContain('--dsw-')
   })
+  it('命中行是 flex 行（回归钉：.novel-row 丢 display:flex 会让「＋ 加书架」掉到标题下方堆叠）', () => {
+    // 真机踩过：样式块重写时把 display/align-items 弄丢，行退化成块级堆叠，marginLeft:auto 失效
+    const m = NOVEL_CSS.match(/\.novel-row\s*\{[^}]*\}/)
+    expect(m, 'NOVEL_CSS 里找不到 .novel-row 规则').toBeTruthy()
+    expect(m![0], '.novel-row 必须是 flex 行').toContain('display: flex')
+    expect(m![0]).toContain('align-items: center')
+  })
    it('视图层源码（src/client/views/*.tsx）无旧 --ds- 假 token', async () => {
     const dir = fileURLToPath(new URL('../../src/client/views/', import.meta.url))
     const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.tsx'))
@@ -188,23 +194,5 @@ describe('styles token 迁移', () => {
         expect(text, `${f} 含旧假 token ${stale}`).not.toContain(stale)
       }
     }
-  })
-})
-
-describe('source-batch 纯函数（批量删除书源）', () => {
-  it('collectIdsByStatus：按状态收集 id，无命中回空', () => {
-    const sources = [
-      { id: 'a', status: 'broken' }, { id: 'b', status: 'verified' }, { id: 'c', status: 'broken' },
-    ]
-    expect(collectIdsByStatus(sources, 'broken')).toEqual(['a', 'c'])
-    expect(collectIdsByStatus(sources, 'unverified')).toEqual([])
-  })
-  it('batchConfirmKind：0→none；1..门槛→simple；门槛+1..→typed（边界表驱动）', () => {
-    expect(batchConfirmKind(0)).toBe('none')
-    expect(batchConfirmKind(-3)).toBe('none')
-    expect(batchConfirmKind(1)).toBe('simple')
-    expect(batchConfirmKind(TYPED_CONFIRM_THRESHOLD)).toBe('simple')
-    expect(batchConfirmKind(TYPED_CONFIRM_THRESHOLD + 1)).toBe('typed')
-    expect(batchConfirmKind(400)).toBe('typed')
   })
 })

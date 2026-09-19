@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { paramRoutes, queries, ROUTES, shelfBody } from '../../shared/wire.js'
 import { prodReaderDeps } from '../deps.js'
@@ -6,7 +6,7 @@ import type { ReaderDeps } from '../deps.js'
 import { createExportRun, IDLE_EXPORT } from '../export-run.js'
 import type { ExportRunState } from '../export-run.js'
 import { navigate, prefsStore, setPref, useStore } from '../store.js'
-import { FONT_STEPS, LINE_HEIGHTS, PAPER_PRESETS } from '../prefs-ui.js'
+import { FONT_STEPS, LINE_HEIGHTS, MEASURES, PAPER_PRESETS } from '../prefs-ui.js'
 import type { ChapterAnchor } from '../progress.js'
 import { ReaderSession } from '../reader-session.js'
 import type { ReaderPort } from '../reader-session.js'
@@ -25,11 +25,15 @@ import type { ChapterEntry, ShelfBook } from './types.js'
  *  面板自己的 z-index 只在工具栏内部有效，对外整层按工具栏的 z 参与排序。工具栏若 ≤ 遮罩，
  *  透明遮罩反压整层：面板看得见，但 elementFromPoint 打到的是遮罩，每个点击都被它吞掉直接
  *  关面板 = 「Aa 能弹出但点不了」（f0a0b0e 把工具栏改 sticky 时引入的真回归；无头 Edge 实测：
- *  工具栏 z5 → HIT=mask，z12 → HIT=opt。守卫见 tests/client/reader-ctrl-z.test.ts）。 */
+ *  工具栏 z5 → HIT=mask，z12 → HIT=opt。守卫见 tests/client/reader-ctrl-z.test.ts）。
+ *  目录抽屉同用 panel 值（抽屉与 Aa 面板互斥、永不同场；遮罩只在 ctrlOpen 时渲染）。 */
 export const CTRL_Z = { toolbar: 12, mask: 10, panel: 11 } as const
 
 /** 阅读控制器面板（android-ebook 同款概念）：悬浮于工具栏下（挂 sticky 工具栏内，
- *  定位与滚动都锚在工具栏上；z 序不变量见 CTRL_Z）；点遮罩关闭——遮罩在 reader 根容器 */
+ *  定位与滚动都锚在工具栏上；z 序不变量见 CTRL_Z）；点遮罩关闭——遮罩在 reader 根容器。
+ *  简约版：chip 式控件（novel-chip/.on），布局归样式类 .novel-prefs；
+ *  行内只留定位与 z（ctrl-z 守卫断言面板渲染含 z-index:11）。
+ *  role=dialog + aria-label：这层是能开能关的浮层，不是页面上普通一块（Esc 关，见 ReaderView）。 */
 export function PrefsPanel(): ReactNode {
   const prefs = useStore(prefsStore)
   const step = (delta: number): void => {
@@ -40,35 +44,55 @@ export function PrefsPanel(): ReactNode {
   return (
     <div
       data-novel-ctrl
-      className={prefs.darkController ? 'novel-panel novel-dark' : 'novel-panel'}
-      style={{ position: 'absolute', right: 12, top: 40, zIndex: CTRL_Z.panel, width: 280, background: 'var(--novel-layer-2)', display: 'flex', flexDirection: 'column', gap: 10 }}
+      role="dialog"
+      aria-label="阅读设置"
+      className={prefs.darkController ? 'novel-dark novel-prefs' : 'novel-prefs'}
+      style={{ position: 'absolute', right: 12, top: 40, zIndex: CTRL_Z.panel }}
     >
-      <section className="novel-group">
-        <div className="novel-muted">字号（当前 {prefs.fontSize}px）</div>
+      <div>
+        <div className="novel-prefs-label">字号（当前 {prefs.fontSize}px）</div>
         <div className="novel-chips">
-          <button className="novel-btn sm" onClick={() => step(-1)}>A-</button>
-          <button className="novel-btn sm" onClick={() => step(1)}>A+</button>
+          <button className="novel-chip" onClick={() => step(-1)} aria-label="减小字号">A−</button>
+          <button className="novel-chip" onClick={() => step(1)} aria-label="增大字号">A＋</button>
         </div>
-      </section>
-      <section className="novel-group">
-        <div className="novel-muted">行距</div>
+      </div>
+      <div>
+        <div className="novel-prefs-label">行距</div>
         <div className="novel-chips">
           {LINE_HEIGHTS.map((lh) => (
-            <button key={lh} className="novel-btn sm" onClick={() => setPref({ lineHeight: lh })} style={prefs.lineHeight === lh ? { borderColor: 'var(--novel-brand)' } : undefined}>{lh}</button>
+            <button key={lh} className={prefs.lineHeight === lh ? 'novel-chip on' : 'novel-chip'}
+              aria-pressed={prefs.lineHeight === lh}
+              onClick={() => setPref({ lineHeight: lh })}>{lh}</button>
           ))}
         </div>
-      </section>
-      <section className="novel-group">
-        <div className="novel-muted">纸张色（正文层，不随深色主题）</div>
+      </div>
+      <div>
+        <div className="novel-prefs-label">栏宽（每行约 {prefs.measure} 字）</div>
+        <div className="novel-chips">
+          {MEASURES.map((m) => (
+            <button key={m.em} className={prefs.measure === m.em ? 'novel-chip on' : 'novel-chip'}
+              aria-pressed={prefs.measure === m.em}
+              onClick={() => setPref({ measure: m.em })}>{m.label}</button>
+          ))}
+        </div>
+      </div>
+      <div>
+        <div className="novel-prefs-label">纸张色（正文层，不随深色主题）</div>
         <div className="novel-chips">
           {PAPER_PRESETS.map((p) => (
-            <button key={p.color} className="novel-btn sm" style={{ background: p.color, color: paperInk(p.color), borderColor: prefs.paperColor === p.color ? 'var(--novel-brand)' : 'var(--novel-border-strong)' }} onClick={() => setPref({ paperColor: p.color })}>{p.name}</button>
+            <button key={p.color} title={p.name} aria-label={p.name} aria-pressed={prefs.paperColor === p.color}
+              className={prefs.paperColor === p.color ? 'novel-chip novel-paper-swatch on' : 'novel-chip novel-paper-swatch'}
+              style={{ background: p.color, color: paperInk(p.color) }}
+              onClick={() => setPref({ paperColor: p.color })} />
           ))}
-          <input type="color" value={prefs.paperColor} onChange={(e) => setPref({ paperColor: e.target.value })} style={{ verticalAlign: 'middle' }} />
+          {/* 正文层的唯一取色入口：行内只有值本身，外观归 .novel-prefs-color
+              （原生 color 控件不套标度会在面板里显得突兀） */}
+          <input type="color" className="novel-prefs-color" aria-label="自定义纸张色"
+            value={prefs.paperColor} onChange={(e) => setPref({ paperColor: e.target.value })} />
         </div>
-      </section>
-      <label style={{ fontSize: 13 }}>
-        <input type="checkbox" checked={prefs.darkController} onChange={(e) => setPref({ darkController: e.target.checked })} style={{ marginRight: 8 }} />
+      </div>
+      <label>
+        <input type="checkbox" checked={prefs.darkController} onChange={(e) => setPref({ darkController: e.target.checked })} />
         控制器层跟随深色
       </label>
     </div>
@@ -78,10 +102,14 @@ export function PrefsPanel(): ReactNode {
 /**
  * 阅读器：连续滚动流（章章首尾相接）。
  *
-  * 时序编排归「阅读会话」（reader-session.ts）：目录→存档恢复→懒加载→预取→
+ * 时序编排归「阅读会话」（reader-session.ts）：目录→存档恢复→懒加载→预取→
  * 进度落盘全在会话里并可单测；本视图只做三件事——渲染会话状态、把 DOM 测量实现成 ReaderPort、
  * 把 scroll/resize 事件喂给会话。正文承载在宿主的 resident scrollport 上（见 scrollport.ts 头注）：
  * 滚动、进度、回跳一律按「真正在滚的容器」算；只渲染已载章节，预取自限。
+ *
+ * 呈现层（简约版）：细工具栏（‹书架 · 居中书名 · ⤓/Aa/目录）+ 正文居中窄列
+ * （布局归 .novel-rdr-body；prefs 色/字号/行距仍行内——正文层永不接宿主 token）
+ * + 目录抽屉 = 正文的 flex 兄弟（sticky + 视口上限，锚视口不锚正文）。z 序仍归 CTRL_Z 常量行内。
  *
  * deps 注入：apiGet/apiSend/streamExport/saveBlob 全走 ReaderDeps——与 ShelfView/
  * SearchView 口径齐平；整本导出的时序编排归 export-run.ts，此处只接线。
@@ -142,10 +170,45 @@ export function ReaderView({ sourceId, bookKey, title, deps = prodReaderDeps }: 
 
   // 第三参 = getServerSnapshot：renderToString（smoke/SSR）必需，缺了直接抛
   const st = useSyncExternalStore(session.subscribe, () => session.state, () => session.state)
-  const { toc, chapters, loadingIdx, error } = st
+  const { toc, chapters, loadingIdx, error, currentChapter } = st
 
   const [drawer, setDrawer] = useState(false)
   const [ctrlOpen, setCtrlOpen] = useState(false)
+  const drawerRef = useRef<HTMLDivElement | null>(null)
+  /** 抽屉条目：元素引用只在目录变化时重建。**不是微优化**：抽屉挂在 ReaderView 里，
+   *  会话每次 notify（载章 / 清错 / 跨章）都会重跑本组件；逐条现造 = 每次 notify 白造
+   *  toc.length 个 React 元素（千章书 = 每跨一章多一次 912 元素的构造 + 比对），
+   *  而多数时候抽屉是关着的。当前章高亮因此不进元素（会把依赖搅浑），
+   *  走下面的 aria-current 单点移动。 */
+  const drawerItems = useMemo<ReactNode[]>(() => (toc ?? []).map((c, i) => (
+    <button key={c.url} data-idx={i} className="novel-drawer-item"
+      onClick={() => { setDrawer(false); session.requestJump(sourceId, i) }}>
+      {c.name}
+    </button>
+  )), [toc, session, sourceId])
+  // 浮层（Aa 面板 / 目录抽屉）共用一条 Esc：两者互斥，永不同场
+  useEffect(() => {
+    if (!ctrlOpen && !drawer) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      setCtrlOpen(false)
+      setDrawer(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [ctrlOpen, drawer])
+  /** 当前章：把 aria-current 移到那一条（样式与语义同一个源）。
+   *  scrollIntoView 存在性判断不是防生产：jsdom 无排版引擎、该方法缺席（与 util.ls
+   *  挡「无 DOM」同一类环境守卫）——缺了它，任何开抽屉的组件测试都会炸在 effect 里。 */
+  useEffect(() => {
+    if (!drawer) return
+    const root = drawerRef.current
+    root?.querySelector('[aria-current="true"]')?.removeAttribute('aria-current')
+    const cur = root?.querySelector<HTMLElement>(`[data-idx="${currentChapter}"]`)
+    if (cur === null || cur === undefined) return
+    cur.setAttribute('aria-current', 'true')
+    cur.scrollIntoView?.({ block: 'center' })
+  }, [drawer, currentChapter])
   // 整本导出：编排归 export-run.ts——start/cancel/状态三态 + 卸载 abort
   // 在那边可单测；本视图只接线：状态经 onChange 进 state，按钮按 running 分流 start/cancel。
   // 导出失败单独一条（会话 error 归阅读链路）
@@ -206,26 +269,38 @@ export function ReaderView({ sourceId, bookKey, title, deps = prodReaderDeps }: 
 
   const shownError = error ?? exportState.error
   return (
-    <div data-novel-view="reader" style={{ position: 'relative', display: 'flex', flexDirection: 'column' }}>
+    <div data-novel-view="reader" className="novel-rdr">
       {/* 偏好面板遮罩：挂 reader 根容器（position:relative 定位参照）盖满整个阅读区——只盖工具栏条时点正文关不掉面板（T4 修复） */}
       {ctrlOpen && <div data-novel-ctrl-mask onClick={() => setCtrlOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: CTRL_Z.mask }} />}
       {/* 控制器层（主题变量；darkController 决定是否跟随深色）——sticky：正文由宿主 scrollport 承载，
-          工具栏不 sticky 会随正文一起滚走（目录/Aa 够不着）。
-          novel-dark 挂工具栏根（不只挂 Aa 面板）：整个控制器层同底，避免「暗面板 + 亮工具栏」。 */}
-      <div className={prefs.darkController ? 'novel-dark' : undefined} style={{ position: 'sticky', top: 0, zIndex: CTRL_Z.toolbar, display: 'flex', gap: 8, alignItems: 'center', padding: '6px 12px', borderBottom: '1px solid var(--novel-border)', background: 'var(--novel-layer-1)' }}>
-        <button onClick={() => navigate({ name: 'shelf' })}>← 书架</button>
-        <button
-          className="novel-btn sm"
-          onClick={exportState.running ? exportRun.cancel : exportRun.start}
-          title={exportState.total === '' ? '整本导出' : `整本导出（共 ${exportState.total} 章）`}
-        >
-          {exportState.running ? `⤓ ${exportState.kb} KB · 取消导出` : '⤓ 下载'}
-        </button>
-        <button className="novel-btn sm" aria-expanded={ctrlOpen} onClick={() => setCtrlOpen(!ctrlOpen)} title="阅读设置">Aa</button>
-        <strong style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</strong>
-        {/* 目录与 Aa 互斥：工具栏已在遮罩之上（CTRL_Z），点目录不再被遮罩顺手关面板——自己关 */}
-        <button onClick={() => { setCtrlOpen(false); setDrawer(!drawer) }}>目录{toc === null ? '' : `（${toc.length}）`}</button>
-        {ctrlOpen && <PrefsPanel />}
+          工具栏不 sticky 会随正文一起滚走（目录/Aa 够不着）。布局归 .novel-rdr-bar（样式层），
+          行内只留 sticky 定位与 z（CTRL_Z 常量，ctrl-z 守卫断言）；novel-dark 挂工具栏根。 */}
+      <div className={prefs.darkController ? 'novel-dark novel-rdr-bar' : 'novel-rdr-bar'}
+        style={{ position: 'sticky', top: 0, zIndex: CTRL_Z.toolbar }}>
+        <button className="novel-btn sm" onClick={() => navigate({ name: 'shelf' })}>‹ 书架</button>
+        <div className="novel-rdr-title">
+          <span className="novel-rdr-book">{title}</span>{toc === null ? '' : ` · 共 ${toc.length} 章`}
+        </div>
+        <div className="novel-rdr-acts">
+          <button
+            className="novel-btn sm"
+            onClick={exportState.running ? exportRun.cancel : exportRun.start}
+            title={exportState.total === '' ? '整本导出' : `整本导出（共 ${exportState.total} 章）`}
+          >
+            {exportState.running ? `⤓ ${exportState.kb} KB · 取消导出` : '⤓ 下载'}
+          </button>
+          <button className="novel-btn sm" aria-expanded={ctrlOpen} aria-label="阅读设置"
+            onClick={() => setCtrlOpen(!ctrlOpen)} title="阅读设置">Aa</button>
+          {/* 目录与 Aa 互斥：工具栏已在遮罩之上（CTRL_Z），点目录不再被遮罩顺手关面板——自己关 */}
+          <button className="novel-btn sm" aria-expanded={drawer} aria-label="目录"
+            onClick={() => { setCtrlOpen(false); setDrawer(!drawer) }}
+            title={toc === null ? '目录' : `目录（${toc.length}）`}>目录</button>
+          {ctrlOpen && <PrefsPanel />}
+        </div>
+        {/* 章进度细线：跨章才动（会话只在 chapterIndex 变化时写 currentChapter）。
+            章内百分比刻意不做——那是每帧量，会让整棵阅读器每帧重渲染。 */}
+        <i className="novel-rdr-trail" aria-hidden="true"
+          style={{ '--novel-pct': String(toc === null ? 0 : (currentChapter + 1) / toc.length) } as CSSProperties} />
       </div>
       {/* 会话错误的重试必须真的重拉（此前 onRetry 接到 setExportState(IDLE_EXPORT)——导出态专用，
           对会话错误是空操作，红色错误条永久粘屏）；导出错误才走导出态复位。 */}
@@ -235,17 +310,21 @@ export function ReaderView({ sourceId, bookKey, title, deps = prodReaderDeps }: 
           else setExportState(IDLE_EXPORT)
         }} />
       )}
-      {/* 正文+抽屉同层 flex——抽屉不再绝对定位锚死工具栏高度 */}
-      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        {/* 正文层：纸张色/字色由 prefs 固定——永不接宿主 token */}
+      {/* 阅读区（纸张色铺满这一层 = full-bleed）：正文列 + 0 宽 sticky 抽屉槽同在此行。
+          抽屉三版死法与现方案的理由见样式层 .novel-drawer-slot 注释。 */}
+      <div className="novel-rdr-main" style={{ background: prefs.paperColor }}>
+        {/* 正文层：字色/字号/行距/栏宽由 prefs 行内固定——永不接宿主 token；纸张色在**外层
+            .novel-rdr-main** 上（full-bleed：纸铺满阅读区，正文列只管文字排到哪儿为止） */}
         <div
           ref={bodyRef}
+          className="novel-rdr-body"
           style={{
-            flex: 1, overflowY: 'auto', background: prefs.paperColor, color: paperInk(prefs.paperColor),
-            fontSize: prefs.fontSize, lineHeight: prefs.lineHeight, padding: '12px 20px',
-          }}
+            color: paperInk(prefs.paperColor),
+            fontSize: prefs.fontSize, lineHeight: prefs.lineHeight,
+            '--novel-measure': `${prefs.measure}em`,
+          } as CSSProperties}
         >
-          {toc === null && <div>目录加载中…</div>}
+          {toc === null && <div className="novel-rdr-loading">目录加载中…</div>}
           {/* 只渲染已载章节：未载章节不进 DOM——scrollHeight 才等于「已读内容高」，预取判据才成立 */}
           {chapters.map((text, i) => text === null
             ? null
@@ -254,36 +333,24 @@ export function ReaderView({ sourceId, bookKey, title, deps = prodReaderDeps }: 
                 key={i}
                 ref={(el) => { chapterRefs.current[i] = el }}
                 data-chapter={i}
-                style={{ marginBottom: '1.2em' }}
               >
-                <h3 style={{ fontSize: '1.05em' }}>{toc?.[i]?.name ?? `第 ${i + 1} 章`}</h3>
-                {text.split('\n').map((para, j) => <p key={j} style={{ margin: '0.6em 0', textIndent: '2em' }}>{para}</p>)}
+                {/* h2 不是 h3：阅读器这一屏没有更高的标题占位，从 h3 起等于给读屏一份断了头的大纲 */}
+                <h2>{toc?.[i]?.name ?? `第 ${i + 1} 章`}</h2>
+                {text.split('\n').map((para, j) => <p key={j}>{para}</p>)}
               </div>
             ))}
           {toc !== null && (
-            <div ref={sentinelRef} data-novel-sentinel style={{ opacity: 0.45, fontSize: 12, padding: '4px 0' }}>
+            <div ref={sentinelRef} data-novel-sentinel className="novel-sentinel">
               {loadingIdx !== null ? '加载中…' : nextChapterIndex(chapters) === -1 ? '— 全书完 —' : '…'}
             </div>
           )}
         </div>
+        {/* 抽屉：0 宽 sticky 槽 + absolute 本体（锚视口、且不切走正文宽度；三版死法见样式层注释） */}
         {drawer && (
-          /* 抽屉：alignSelf:flex-start 不参与行高拉伸（否则 912 条目录会把整页撑到 2 万多像素——
-             宿主是内容撑高的，行高 = max(正文, 目录)），maxHeight + sticky 让它自己滚并钉在工具栏下 */
-          <div className="novel-drawer" style={{ alignSelf: 'flex-start', position: 'sticky', top: 44, maxHeight: 'calc(100vh - 60px)' }}>
-            {(toc ?? []).map((c, i) => (
-              <div
-                key={c.url}
-                role="button"
-                tabIndex={0}
-                className="novel-drawer-item"
-                onClick={() => {
-                  setDrawer(false)
-                  session.requestJump(sourceId, i)            // 目录直达：未载先拉，落地后定位
-                }}
-              >
-                {c.name}
-              </div>
-            ))}
+          <div className="novel-drawer-slot">
+            <div ref={drawerRef} className="novel-drawer" role="dialog" aria-label="目录">
+              {drawerItems}
+            </div>
           </div>
         )}
       </div>

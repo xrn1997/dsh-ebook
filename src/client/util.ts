@@ -27,7 +27,7 @@ export function debounce<A extends unknown[]>(
   return wrapped
 }
 
-/** localStorage guard：renderToString/无 DOM 环境退内存 Map（不许炸）——sections/prefs 等持久位共用 */
+/** localStorage guard：renderToString/无 DOM 环境退内存 Map（不许炸）——prefs 等持久位共用 */
 const memory = new Map<string, string>()
 export const ls: Pick<Storage, 'getItem' | 'setItem'> = {
   getItem: (k) => {
@@ -51,4 +51,14 @@ export function paperInk(paper: string): string {
   const lin = (v: number): number => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
   const L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
   return L > 0.35 ? '#222' : '#e8e8ea'
+}
+
+/** 无封面降级的首字色块档位（token 层 --novel-cover-1..4 的类名映射；hex 不出 token 层，
+ *  theme-tokens 守卫口径）。按首字符 codePoint 求和派生——同书恒同色、可复现；
+ *  空标题回 t1（与 coverFallbackChar 的「书」同防）。 */
+export function coverTintClass(title: string): 'novel-cover-t1' | 'novel-cover-t2' | 'novel-cover-t3' | 'novel-cover-t4' {
+  const t = title.trim()
+  let sum = 0
+  for (const ch of t) sum = (sum + (ch.codePointAt(0) ?? 0)) % 4
+  return `novel-cover-t${sum + 1}` as 'novel-cover-t1' | 'novel-cover-t2' | 'novel-cover-t3' | 'novel-cover-t4'
 }

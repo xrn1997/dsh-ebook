@@ -78,8 +78,27 @@ describe('@put / @get 变量', () => {
     expect(() => evalPut('{a:"1" b:"2"}', { vars: {} }, L, 'detail')).toThrow(UnsupportedRuleError) // 顶层缺逗号
   })
 
-  it('值不带引号 → UnsupportedRuleError「@put 值必须带引号」', () => {
-    expect(() => evalPut('{bid:$._id}', { vars: {} }, L, 'detail')).toThrow(/@put 值必须带引号/)
+  it('值不带引号 → legado 口径收（JSONPath / 键访问 / 字面串；v1 曾一律抛「必须带引号」）', () => {
+    const ctx1: EvalContext = { vars: {}, json: { _id: '9527' } }
+    evalPut('{bid:$._id}', ctx1, L, 'detail')
+    expect(ctx1.vars!.bid).toBe('9527') // 裸 JSONPath 照常求值
+    const ctx2: EvalContext = { vars: {}, html: JSON.stringify({ ComicID: '88' }) }
+    evalPut('{cid:ComicID}', ctx2, L, 'search')
+    expect(ctx2.vars!.cid).toBe('88') // 键访问（legado LinkedTreeMap「键值直接访问」口径）
+    const ctx3: EvalContext = { vars: {} }
+    evalPut('{img:pic}', ctx3, L, 'toc')
+    expect(ctx3.vars!.img).toBe('pic') // 非 JSON 上下文 → 字面存（如实，@get 可诊断）
+  })
+
+  it('带引号的值是显式字面量，不吃裸值的键访问（@put:{img:"pic"} ≠ @put:{img:pic}）', () => {
+    // 病史（2026-09 审查）：parsePairs 丢掉「值是否带引号」，于是显式字面量也被 legado
+    // LinkedTreeMap 键访问分支接管，静默变成条目里的 pic 字段——用户写的字面量拿不到。
+    const quoted: EvalContext = { vars: {}, html: JSON.stringify({ pic: '不该被取到' }) }
+    evalPut('{img:"pic"}', quoted, L, 'search')
+    expect(quoted.vars!.img).toBe('pic')                       // 字面量原样落盘
+    const bare: EvalContext = { vars: {}, html: JSON.stringify({ pic: '键访问值' }) }
+    evalPut('{img:pic}', bare, L, 'search')
+    expect(bare.vars!.img).toBe('键访问值')                      // 裸值仍走键访问，两种值不折叠
   })
 
   it('值引号未闭合 → UnsupportedRuleError', () => {
@@ -103,5 +122,12 @@ describe('@put / @get 变量', () => {
     const ctx: EvalContext = { vars: {} }
     expect(evalPut('{}', ctx, L, 'detail').kind).toBe('value')
     expect(ctx.vars).toEqual({})
+  })
+
+  it('@get 只认自有键：原型链成员名如实 Miss（此前 `ctx.vars[name]` 能把 Object.prototype 成员当变量值返回）', () => {
+    expect(evalGetVar('toString', { vars: {} }).kind).toBe('miss')
+    expect(evalGetVar('constructor', { vars: { a: '1' } }).kind).toBe('miss')
+    expect(evalGetVar('__proto__', { vars: {} }).kind).toBe('miss')
+    expect(evalGetVar('a', { vars: { a: '1' } })).toEqual({ kind: 'value', text: '1' }) // 正路不受影响
   })
 })

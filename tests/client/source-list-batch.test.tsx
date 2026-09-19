@@ -10,10 +10,15 @@ import { ROUTES } from '../../src/shared/wire.js'
 import type { JobState, SourcePublic } from '../../src/client/views/types.js'
 
 /**
- * 选中动作条 + 批量删除确认流的接线测试：「启用/停用所选」「验证所选」
- * 「删除所选」与 BatchConfirm typed 确认流（>20 手输「删除」）、confirmDelete 失败半场
- * 此前零测试（grep tests/ = 0 命中）——client 破坏性最高的未测 seam，全是破坏性写操作。
- * 经 makeDeps 假束驱动：断言写口载荷、失败上报、确认强度与在途防重复提交。
+ * 选中动作条 + 删除确认流的接线测试。
+ * 2026 调度台改版（用户逐项裁定）的口径变化，本文件随之重写：
+ * - 删除确认统一为**模态二次确认**（与书架删书同款口径：点名后果 + 登录态提示 +
+ *   Esc/遮罩取消 + 焦点闭环 + ids 点击时快照）；
+ * - 「>20 条手输『删除』」双强度确认与「危险区（整库级快捷批量）」退役——
+ *   batchConfirmKind 已随之删除（`source-batch.ts` 整模块退役，取数口归 `source-inbox.ts`），
+ *   对应 describe 从 logic.test.ts 移除；
+ * - 行内「⋯」溢出菜单提供单源删除入口（低频动作收纳）。
+ * 启停/验证批量的写口载荷、失败上报、在途防重复提交口径不变。
  */
 
 const src = (over: Partial<SourcePublic> & { id: string }): SourcePublic => ({
@@ -33,7 +38,7 @@ const runningProbe: JobState = {
 }
 
 const view = (deps: FakeSettingsDeps, sources: SourcePublic[] = [S1, S2, S3], job: JobState | null = null): ReactNode =>
-  <SourceList sources={sources} job={job} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} deps={deps} />
+  <SourceList sources={sources} job={job} refresh={() => {}} onChanged={() => {}} onProbe={() => {}} onImport={() => {}} deps={deps} />
 
 /** 进编辑态并勾选指定行（复选框 aria-label = `选择 ${name}`） */
 function selectRows(names: string[]): void {
@@ -62,7 +67,6 @@ describe('选中动作条：启用/停用/验证所选（写口载荷 + 成功�
 
     await waitFor(() => expect(deps.apiSend).toHaveBeenCalledWith(
       'POST', ROUTES.sourcesBatchEnabled.path, { ids: ['s1', 's2'], enabled: true }))
-    // 成功路径：编辑态退出 → 选择集清空 → 动作条消失（服务端为准，行内开关等 reload 校准）
     await waitFor(() => expect(document.querySelector('[data-novel-selbar]')).toBeNull())
     expect(deps.pushError).not.toHaveBeenCalled()
   })
@@ -88,7 +92,7 @@ describe('选中动作条：启用/停用/验证所选（写口载荷 + 成功�
     const deps = makeDeps({ apiSend: vi.fn(() => Promise.reject(new Error('boom'))) })
     const refresh = vi.fn()
     render(
-      <SourceList sources={[S1, S2, S3]} job={null} refresh={refresh} onChanged={() => {}} onProbe={() => {}} deps={deps} />
+      <SourceList sources={[S1, S2, S3]} job={null} refresh={refresh} onChanged={() => {}} onProbe={() => {}} onImport={() => {}} deps={deps} />
     )
     selectRows(['源一'])
     fireEvent.click(screen.getByText('启用所选'))
@@ -98,78 +102,84 @@ describe('选中动作条：启用/停用/验证所选（写口载荷 + 成功�
     expect(refresh).not.toHaveBeenCalled()
   })
 
-  it('在途防重复提交：批量任务运行中（probing）三个写按钮全部禁用，删除所选仍可开确认', () => {
+  it('在途防重复提交：批量任务运行中（probing）三个写按钮禁用；删除走模态确认仍可打开（可先攒着）', async () => {
     const deps = makeDeps()
     render(view(deps, [S1, S2, S3], runningProbe))
     selectRows(['源一'])
     expect(selbarButton('启用所选').hasAttribute('disabled')).toBe(true)
     expect(selbarButton('停用所选').hasAttribute('disabled')).toBe(true)
     expect(selbarButton('验证所选').hasAttribute('disabled')).toBe(true)
-    // 删除走 typed 确认流（可先攒着，任务跑完再确认）——不随 probing 禁用
     expect(selbarButton('删除所选').hasAttribute('disabled')).toBe(false)
   })
 })
 
-describe('删除所选：确认流（≤20 计数确认 / >20 手输「删除」）', () => {
-  it('≤20 普通计数确认：确认后 POST batch-delete {ids}，成功关条 + onChanged', async () => {
+describe('删除：统一模态二次确认（2026 改版——手输口令与危险区退役）', () => {
+  it('删除所选 → 模态点名数量；确认后 POST batch-delete {ids}（点击时快照）', async () => {
     const deps = makeDeps()
     const onChanged = vi.fn()
     render(
-      <SourceList sources={[S1, S2, S3]} job={null} refresh={() => {}} onChanged={onChanged} onProbe={() => {}} deps={deps} />
+      <SourceList sources={[S1, S2, S3]} job={null} refresh={() => {}} onChanged={onChanged} onProbe={() => {}} onImport={() => {}} deps={deps} />
     )
     selectRows(['源一', '源二'])
     fireEvent.click(screen.getByText('删除所选'))
 
-    // 确认条：计数点名 + 无口令输入
-    expect(screen.getByText('删除所选（2 个）')).toBeTruthy()
-    expect(screen.queryByPlaceholderText('大批量：手输「删除」二字确认')).toBeNull()
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(screen.getByText('删除所选 2 个源？')).toBeTruthy()
+    expect(screen.queryByText(/带登录态/)).toBeNull()          // 无登录态源：不虚构提示
 
     fireEvent.click(screen.getByText('确认删除'))
     await waitFor(() => expect(deps.apiSend).toHaveBeenCalledWith(
       'POST', ROUTES.sourcesBatchDelete.path, { ids: ['s1', 's2'] }))
-    await waitFor(() => expect(screen.queryByText('确认删除')).toBeNull())   // 关条
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(onChanged).toHaveBeenCalledTimes(1)
     expect(deps.pushError).not.toHaveBeenCalled()
   })
 
-  it('>20 typed 流：确认钮先禁用，手输「删除」（trim 后）才放行；口令不对不放行', async () => {
-    const many = Array.from({ length: 21 }, (_, i) => src({ id: `m${i}`, name: `源${i}` }))
-    const deps = makeDeps()
-    render(view(deps, many))
-    fireEvent.click(screen.getByText('编辑'))
-    fireEvent.click(screen.getByLabelText('全选当前过滤结果'))
-    await waitFor(() => expect(screen.getByText('已选 21')).toBeTruthy())
-    fireEvent.click(screen.getByText('删除所选'))
-
-    expect(screen.getByText('删除所选（21 个）')).toBeTruthy()
-    const input = screen.getByPlaceholderText('大批量：手输「删除」二字确认')
-    const confirm = (): HTMLElement => screen.getByText('确认删除')
-    expect(confirm().hasAttribute('disabled')).toBe(true)
-
-    fireEvent.change(input, { target: { value: '删除啊' } })                // 错口令：仍禁用
-    expect(confirm().hasAttribute('disabled')).toBe(true)
-    fireEvent.change(input, { target: { value: ' 删除 ' } })                // trim 后放行
-    expect(confirm().hasAttribute('disabled')).toBe(false)
-
-    fireEvent.click(confirm())
-    const expected = many.map((s) => s.id)
-    await waitFor(() => expect(deps.apiSend).toHaveBeenCalledWith(
-      'POST', ROUTES.sourcesBatchDelete.path, { ids: expected }))
-  })
-
-  it('带登录态源点名：确认条提示 cookie 失效（authCount 经派生 view-model）', () => {
+  it('带登录态源点名：模态提示 cookie 失效（authCount 经派生 view-model）', () => {
     const deps = makeDeps()
     render(view(deps))
     selectRows(['源一', '源三'])
     fireEvent.click(screen.getByText('删除所选'))
-    expect(screen.getByText('其中 1 个带登录态，删除后 cookie 失效')).toBeTruthy()
+    expect(screen.getByText(/其中 1 个带登录态，删除后 cookie 失效/)).toBeTruthy()
   })
 
-  it('confirmDelete 失败半场：pushError 上报「批量删除失败」，确认条照常收起，onChanged 不触发', async () => {
+  it('Esc 取消：模态收起且零 DELETE 请求（取消不许有写口）', () => {
+    const deps = makeDeps()
+    render(view(deps))
+    selectRows(['源一'])
+    fireEvent.click(screen.getByText('删除所选'))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(deps.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('点遮罩取消：同样零请求', () => {
+    const deps = makeDeps()
+    render(view(deps))
+    selectRows(['源一'])
+    fireEvent.click(screen.getByText('删除所选'))
+    fireEvent.click(document.querySelector('.novel-modal-mask') as Element)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(deps.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('焦点闭环：入场焦点在「取消」；关闭后焦点还给触发件（与书架删书同款口径）', () => {
+    const deps = makeDeps()
+    render(view(deps))
+    selectRows(['源一'])
+    const opener = screen.getByText('删除所选')
+    opener.focus()                                       // jsdom 的 click 不聚焦（真实浏览器会）——焦点断言先显式聚焦
+    fireEvent.click(opener)
+    expect(document.activeElement?.textContent).toBe('取消')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.activeElement?.textContent).toBe('删除所选')
+  })
+
+  it('confirmDelete 失败半场：pushError 上报「批量删除失败」，模态照常收起，onChanged 不触发', async () => {
     const deps = makeDeps({ apiSend: vi.fn(() => Promise.reject(new Error('磁盘只读'))) })
     const onChanged = vi.fn()
     render(
-      <SourceList sources={[S1, S2, S3]} job={null} refresh={() => {}} onChanged={onChanged} onProbe={() => {}} deps={deps} />
+      <SourceList sources={[S1, S2, S3]} job={null} refresh={() => {}} onChanged={onChanged} onProbe={() => {}} onImport={() => {}} deps={deps} />
     )
     selectRows(['源一'])
     fireEvent.click(screen.getByText('删除所选'))
@@ -178,46 +188,73 @@ describe('删除所选：确认流（≤20 计数确认 / >20 手输「删除」
     await waitFor(() => expect(deps.pushError).toHaveBeenCalledTimes(1))
     expect(String(deps.pushError.mock.calls[0][0])).toContain('批量删除失败')
     expect(String(deps.pushError.mock.calls[0][0])).toContain('磁盘只读')
-    expect(screen.queryByText('确认删除')).toBeNull()        // setPending(null)：失败也收条（错误进全局条）
+    expect(screen.queryByRole('dialog')).toBeNull()       // 失败也收模态（错误进全局条，可重开）
     expect(onChanged).not.toHaveBeenCalled()
   })
 
-  it('取消：确认条收起，零写请求', () => {
-    const deps = makeDeps()
+  it('确认在途防重：双击「确认删除」只发一次 POST（危险动作不许有双写窗口——与书架 delBusy 同款口径）', async () => {
+    let resolveSend: (v: unknown) => void = () => { /* replaced below */ }
+    const deps = makeDeps({ apiSend: vi.fn(() => new Promise((res) => { resolveSend = res })) })
     render(view(deps))
     selectRows(['源一'])
     fireEvent.click(screen.getByText('删除所选'))
-    fireEvent.click(screen.getByText('取消'))
-    expect(screen.queryByText(/删除所选（/)).toBeNull()
-    expect(deps.apiSend).not.toHaveBeenCalled()
-  })
-})
-
-describe('危险操作区：整库级快捷批量（ids 点击时快照）', () => {
-  it('删除全部坏源：确认条点名坏源集合，确认后按快照 ids 提交', async () => {
-    const broken1 = src({ id: 'b1', name: '坏一', status: 'broken' })
-    const broken2 = src({ id: 'b2', name: '坏二', status: 'broken' })
-    const deps = makeDeps()
-    render(view(deps, [S1, broken1, broken2]))
-    fireEvent.click(screen.getAllByText('删除…')[0])         // 危险区第一个：删除全部坏源
-
-    expect(screen.getByText('删除全部坏源（2 个）')).toBeTruthy()
     fireEvent.click(screen.getByText('确认删除'))
-    await waitFor(() => expect(deps.apiSend).toHaveBeenCalledWith(
-      'POST', ROUTES.sourcesBatchDelete.path, { ids: ['b1', 'b2'] }))
+    fireEvent.click(screen.getByText('确认删除'))         // 第二击：即使事件到达，confirmDelete 的 delBusy 闸也拒之门外
+    expect(deps.apiSend).toHaveBeenCalledTimes(1)
+    resolveSend({ removed: 1 })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
-  it('删除全部未验证：作用对象是未验证集合，与坏源集合互不串', async () => {
-    const unv = src({ id: 'u1', name: '未验一', status: 'unverified' })
-    const brk = src({ id: 'b1', name: '坏一', status: 'broken' })
+  it('ids 是点击时快照：模态开着时改选中集，确认提交的仍是开模时的 ids（快照不是重算）', async () => {
     const deps = makeDeps()
-    render(view(deps, [S1, unv, brk]))
-    const dels = screen.getAllByText('删除…')
-    fireEvent.click(dels[1])                                 // 第二个：删除全部未验证
-
-    expect(screen.getByText('删除全部未验证源（1 个）')).toBeTruthy()
+    render(view(deps))
+    selectRows(['源一', '源二'])
+    fireEvent.click(screen.getByText('删除所选'))
+    fireEvent.click(screen.getByLabelText('选择 源三'))   // 模态开着：现场再勾一个（jsdom 无遮罩命中测试，事件直达复选框）
     fireEvent.click(screen.getByText('确认删除'))
     await waitFor(() => expect(deps.apiSend).toHaveBeenCalledWith(
-      'POST', ROUTES.sourcesBatchDelete.path, { ids: ['u1'] }))
+      'POST', ROUTES.sourcesBatchDelete.path, { ids: ['s1', 's2'] }))   // 不含 s3——pending.ids 是开模时的快照
+  })
+
+  it('重渲染不扰焦点：父层 re-render（任务轮询 1s 一次的新闭包）不重抢焦点，Esc 关闭后焦点仍还给触发件', () => {
+    const deps = makeDeps()
+    const { rerender } = render(view(deps))
+    selectRows(['源一'])
+    const opener = screen.getByText('删除所选')
+    opener.focus()                                       // jsdom 的 click 不聚焦（真实浏览器会）——先显式聚焦
+    fireEvent.click(opener)
+    expect(document.activeElement?.textContent).toBe('取消')   // 入场焦点
+    ;(screen.getByText('确认删除') as HTMLElement).focus()      // 用户把焦点移进模态
+    expect(document.activeElement?.textContent).toBe('确认删除')
+    // 壳层重渲染 × 2（模拟 useJobStatus 轮询 tick：新 job 对象 → SourceList 重渲染 → 新 onCancel 闭包）。
+    // 旧实现：effect 依赖 [onCancel] → 每次重渲染 cleanup+重跑 → 焦点被劫回「取消」、
+    // opener 被重捕获成模态内按钮（关闭时焦点落 body）。挂载作用域化后焦点必须原地不动。
+    rerender(view(deps))
+    rerender(view(deps))
+    expect(document.activeElement?.textContent).toBe('确认删除')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.activeElement?.textContent).toBe('删除所选')   // 还焦给触发件（opener 由调用方传入）
+  })
+
+  it('行内「⋯ → 删除」单源：模态点名书名《源一》；「停用 ≠ 删除」提示在场', () => {
+    const deps = makeDeps()
+    render(view(deps))
+    fireEvent.click(screen.getByLabelText('更多动作 源一'))
+    fireEvent.click(screen.getByRole('menuitem', { name: '删除' }))
+    expect(screen.getByText('删除《源一》？')).toBeTruthy()
+    expect(screen.getByText(/停用 ≠ 删除/)).toBeTruthy()
+    // 焦点闭环对这条路也必须成立：菜单项点完即随菜单卸载，旧实现读 document.activeElement
+    // 拿到的是 body（取消后焦点掉 body，2026-09 审查发现的空承诺）——归还对象是行内 ⋯ 钮。
+    expect(document.activeElement?.textContent).toBe('取消')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.activeElement).toBe(screen.getByLabelText('更多动作 源一'))
+  })
+
+  it('「⋯」菜单：点页面任意处收起（浮层不留悬空）', () => {
+    render(view(makeDeps()))
+    fireEvent.click(screen.getByLabelText('更多动作 源一'))
+    expect(screen.getByRole('menu')).toBeTruthy()
+    fireEvent.click(document.body)
+    expect(screen.queryByRole('menu')).toBeNull()
   })
 })

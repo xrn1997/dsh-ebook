@@ -11,13 +11,13 @@
 | `services/intake.ts` | 源入库：normalize → 批内留首条 → 按址去重 → add/replace | `SourceIntake`、`IntakeDecision`、`dedupKey` |
 | `services/import-job.ts` | 后台任务单槽（导入 / 批量验证） | `SourceJobs`、`JobRunningError`、`JobKind`、`ImportFile` |
 | `services/normalize.ts` | 三方言（legado 平铺 / legado 对象 / Native）→ 规范化规则集 | `normalizeSource`、`NormalizeResult`、`splitGroups`、`stripLeadingIcons`、`isNativeSource`、`SOURCE_KIND_LABEL` |
-| `services/request.ts` | 请求组装：模板 + 变量 + baseUrl → 可执行请求计划 | `assembleRequest`、`fetchInitOf`、`parseUrlOption`、`stripUrlOption`、`buildSearchRequest`、`RequestPlan` |
+| `services/request.ts` | 请求组装：模板 + 变量 + baseUrl → 可执行请求计划 | `assembleRequest`、`fetchInitOf`、`parseUrlOption`、`stripUrlOption`、`splitUrlOption`、`absUrlKeepOption`、`canonUrl`、`buildSearchRequest`、`RequestPlan` |
 | `services/search-face.ts` | 搜索面：JS 模板解析 → 组装 → 抓取解码 → 列表求值 → 条目 | `fetchSearchPage`、`searchErrorCodeOf`、`SearchFaceResult` |
 | `services/search-template.ts` | searchUrl 的 JS 形态与 `{{…}}` 预求值 | `resolveSearchTemplate`、`resolveJsSearchTemplate`、`preEvaluateUrlJs`、`isJsSearchUrl` |
 | `services/fetcher.ts` | 守门抓取器（唯一出站口）+ 解码链 + 出站头合并 | `createFetcher`、`decodeBody`、`fetchTextPage`、`headerOf`、`Fetcher`、`FetchedPage` |
 | `services/engine-fetch.ts` | `@js` 里 `java.ajax` 的守门出口 | `engineFetch` |
 | `services/bridge.ts` | 引擎↔服务桥：值规约、条目提取、源级求值上下文 | `firstValue`、`listValue`、`extractItems`、`engineContextOf`、`makeSubEval`、`Page`、`SubRuleEval` |
-| `services/pagination.ts` | 翻页三闸（回环 / 零新增 / 上限 + 串章） | `followPages`、`FollowResult` |
+| `services/pagination.ts` | 翻页闸（URL 防环 / 零新增 / 回环 / 上限 + 串章）+ next 列表语义 | `followPages`、`FollowResult` |
 | `services/chapter-page.ts` | 章节分页判定（防串章闸判据） | `isSameChapterPage`、`stripExtension` |
 | `services/content.ts` | 正文取值收口（HTML → 纯文本，幂等） | `contentToText`、`htmlToText`、`looksLikeHtml` |
 | `services/localbooks.ts` | 本地 TXT 书库：解码 / 切章 / 偏移切片 / 内存 LRU / 删除 | `LocalBooks`、`decodeLocalText`、`splitChapters`、`isLocalBookKey`、`ChapterSpan` |
@@ -91,7 +91,7 @@
 
 `fetchInitOf(plan, baseHeaders)` 是 init 姿态单点：GET **不带 method 键**（fetch 缺省即 GET）；POST 带 method 与插值后的 body；`baseHeaders`（如源级 `headerOf`）打底、计划 headers 覆盖同名。**被否决的方案**：`buildSearchRequest` 与 `engineFetch` 各写一份、靠「与对方同口径」注释同步。
 
-`stripUrlOption(href)` 剥章节 / 下一页 URL 尾部的 `,{"webView":true}` 选项后缀（legado 嗅探语义）：只认「逗号 + 完整 JSON 对象收尾」，正文里的 `{a,b}` 不误剥。本插件不支持 WebView——剥掉后缀让普通请求照常尝试，而不是 URL 解析必炸。
+`stripUrlOption(href)` 剥 URL 尾部的 `,{"webView":true}` 选项后缀（legado 嗅探语义）：只认「逗号 + 完整 JSON 对象收尾」，正文里的 `{a,b}` 不误剥。本插件不支持 WebView——剥掉后缀让普通请求照常尝试，而不是 URL 解析必炸。**现仅详情页书 URL 一处用它**（`reading.getDetail`）：章节 / 下一页 URL 已改为落库保留选项（见下节「章节 URL 保留 `,{option}` 后缀」），比对口径另有 `canonUrl` 剥选项归一。
 
 ### 6. 守门 fetcher（`services/fetcher.ts`）——唯一出站口
 
@@ -111,7 +111,7 @@
 
 ### 8. 探针（`services/probe.ts`）
 
-真发一次搜索请求，关键词按 `PROBE_KEYS = ['书','小说','的']` 逐词重试——单字「书」在个别站被搜索程序停用（实测 aijjxs 对「书」0 命中、其余词 1 命中）。**只有「请求成功但 0 命中」才换词**；网络 / 规则异常立即返回，不多打请求。`ruleBookList ≥1 条目且首条 ruleBookName 非空` → `verified`，否则 `broken` 并如实透出（引擎错误 message 已含段级定位）。
+真发一次搜索请求，关键词按 `PROBE_KEYS = ['书','小说','的']` 逐词重试——单字「书」在个别站被搜索程序停用（实测 aijjxs 对「书」0 命中、其余词 1 命中）。**只有「请求成功但 0 命中」才换词**；网络 / 规则异常立即返回，不多打请求。`ruleBookList ≥1 条目且首条 ruleBookName 非空` → `verified`，否则 `broken` 并如实透出（引擎错误 message 已含段级定位）。书名求值的 `usage` 必须与搜索面一致（`'value'`）：规则以属性终端收尾（`@title`/`@onclick`/`@_src`）时两种用途结果不同——探针曾按缺省 `'list'` 求值，把搜索面读得出书名的源判成「首条书名为空」的坏源（2026-09 审查修，钉子 `tests/services/probe.test.ts`）。CONTEXT.md「搜索面」的「探针与聚合搜索共用一次请求语义」全靠这一条成立。
 
 **探针与搜索同一个耐心值**：`opts.timeoutMs` 缺省走 `ReadingService.searchTimeoutMs`，门面 `probe()` 显式传入。「配了 5s 就都是 5s」是既有承诺——修复前门面 `probe` 漏传，落回 fetcher 固定 15s。
 
@@ -198,8 +198,11 @@ services/reading.ts（ReadingService）── 唯一业务入口，部件装配�
 
 - **搜索**：`search(keyword, {sourceIds})` 过滤 `enabled` 源（`[]` = 未限定 = 搜全部启用源）→ 按 `searchParallel` 分批 `Promise.all` → 每源独立 `searchOne`（catch 后只写该组 `error`，单源失败不拖垮整批）。`searchPlan()` 是同一参与集判定的唯一主人——客户端分批与进度条按它走，不再自行重推导启停 invariant。
 - **阅读**：`getToc` 缓存优先（`refresh` 跳过）+ **in-flight 去重**（同书并发只拉一次，`tocInflight`）；`getChapter` 缓存优先 + 目录越界守卫（双边：负数与超长都拦，HTTP 面有 `^\d+$`、工具面无下限，守门必须盖住两面入口）+ 多页串接 + Miss 抛 `RuleEvalError` 不吞。
-- **目录 / 正文的翻页**：`followOrSingle` 在 next 规则为 `null` 时短路单页（无翻页发现能力），否则走 `followPages` 三闸——回环闸（出现重复条目即判到底，软 404 防御）、零新增闸（空页不追 next）、上限闸（`tocMaxPages` 200 / `contentMaxPages` 50）。正文面额外带**串章闸**：末页「下一页」常指向下一章（笔趣阁 `.prenext`），`isSameChapterPage` 判不准时宁漏页不串章。
+- **目录 / 正文的翻页**：`followOrSingle` 在 next 规则为 `null` 时短路单页（无翻页发现能力），否则走 `followPages`（CONTEXT.md「判到底」）。next 规则按**列表语义**求值（legado getStringList(isUrl=true)）：单候选链式跟进、多候选全部抓取不递归；停止判据 = URL 防环 → 零新增（本页 0 条）→ 回环（本页有条目但 0 新增；**部分重复不停**——此前「出现重复即停」把站点页间重叠的真实页截断）→ 上限（`tocMaxPages` 200 / `contentMaxPages` 50）。正文面串章闸：**目录知识优先**（候选「下一页」canon 后 == 目录里其他章节 URL → `chapter-boundary`；legado「下一页 == 下一章 URL 即 break」正判据）——路径启发式 `isSameChapterPage` 只在无目录知识时兜底，因为 `?id=..&cid=..&page=2` 这类非页码键分页会被启发式误拦（「一章只解析出一页」的根因之一）。
+- **章节 URL 保留 `,{option}` 后缀**（legado BookChapter.getAbsoluteURL 口径）：目录落库不再 strip 选项（`absUrlKeepOption`：URL 部分绝对化、选项原文接回）；抓取时 `reading.fetchPage` 经 `assembleRequest` 单点解释选项（POST method/body、charset 进解码链、headers 合并）——API 型章节端点（POST body 模板）不再退化成裸 GET。`canonUrl` 是串章闸/防环的比对口径（剥选项 + URL 归一化）。
+- **目录 URL 缺失逐章回退**：`ruleChapterUrl` 取空 → 该章地址回退**目录页地址**（legado BookChapterList「未获取到url,使用baseUrl替代」）——此前「url null → 整条丢弃」把这类源的目录清成 0 章（EmptyToc 桶的成因之一）。**但整本每一条都回退就不是缺链接，而是规则整体失效**：静默产出 N 条指向目录页自身的 toc 等于拿合法形状冒充成功（本仓镜像的宁炸不猜），故 `extract` 收口处判 `fellBack === out.length` → 抛 `RuleEvalError` 点名 `ruleChapterUrl` 与回退条数（2026-09 审查；钉子 `tests/services/reading.test.ts` 成对——混合形态仍逐章回退，不许改回整条丢弃）。
 - **零命中不得静默**：正文规则取到空文本 → 抛 `RuleEvalError` 并带落点（请求地址 → 实际落地地址，两者不同即说明被跳转走了），**不写缓存**；缓存读取时空正文一律当未命中（旧版曾把站点跳转落地页的零命中写成 0 字节缓存，27 章全空到无感）。目录 / 正文规则缺失同样不降级 `?? ''`（空串规则会把整页文本当正文），宁炸不猜。
+- **正文取值收口**（`services/content.ts`，legado HtmlFormatter 对齐）：HTML → 纯文本时 **img 保留为地址行**（`<img src>`/`data-src` → 独立行，漫画/图片章节不再整章零命中）；藏在 `<noscript>` 里的 img 同样取回——domhandler 把 noscript 内容按 raw text 解析（`find('img')` 为 0），下钻那层文本等于把字面 `<img src="…">` 当正文吐给读者，故正文面把那层文本**再解析一次**再走行规约（`engine/dom.ts` 的 noscript 分支）；非 HTML 形态含预转义实体时白名单解码（`&nbsp;`/`&#8220;` 等，未知实体原样——不猜）；**解出来仍像 HTML 就在同一趟转成纯文本**——`&lt;p&gt;…` 这类预转义正文若只解码不收口，产物就带标签，违反「产物不含标签」的幂等前提，而 `reading.getChapter` 对缓存还要再收一次口，第二趟会把段落当标签吞掉（同一章在缓存前后长得不一样的根因）。
 - **值规约（服务层侧）**：引擎的 `EngineValue` 到服务层字符串只有两个出口——`firstValue`（单值：miss→null、value→text、list→`join('\n')`、matches→每行首列）与 `extractItems`（列表页条目：nodes→逐节点 HTML 片段、list→逐项、matches→行 `join('\t')`、miss→`[]`）。`nodes` 落到单值出口是错误而非数据，抛带 facet 与节点数的 `RuleEvalError`（`segmentIndex = -1` 表示服务层规约层，不是规则某一段）。空态裁决口径见 `CONTEXT.md`「取值规约」（取位失败 → Miss；解析到空集合 → 空 List），唯一实现在 `engine/select.ts` 的 `reducePicked`——服务层不复制这套判定，只消费结果。
 
 ### 工具面与 HTTP 面共用 service 层的证据（不存在第二套实现）
@@ -228,6 +231,7 @@ services/reading.ts（ReadingService）── 唯一业务入口，部件装配�
 | 门控 | 跑法 | 承诺边界 |
 | --- | --- | --- |
 | `DSH_REPROBE=1` | `pnpm vitest run tests/reprobe.test.ts` | 对 `sources.json` 全量真发搜索请求，得出**当前网络 + 当前源集**的 verified 率与失败分布。真实访问网络、数分钟量级；结论随时间与代理环境漂移，不是回归断言。 |
+| `DSH_CONTENT_AUDIT=1` | `pnpm vitest run tests/content-audit.test.ts` | 对 `sources.json` 全量跑**搜索 → 目录 → 正文（多章采样）**全链路（enabled 全置 true——审计问「链路通不通」，不问启停），逐源按 stage + 错误类分桶，报告落 `.superpowers/content-audit/`（过程产物不入库）。**「verified」只证明搜索面**——正文可用率以本审计为准，注意它是**报告不是通过率门**：分桶读数给人判，代码只断言每个注册源都进了 stage（漏审即红）。真实访问网络、十几分钟量级。 |
 | `COMPAT_CAPTURE=1` | `pnpm vitest run --config vitest.compat.config.ts tests/compat/capture.test.ts` | 把真实站点抓成 fixture 快照（脱敏两刀后落盘）。采集与回放**必须同关键词**（manifest 已记）；GBK 源 v1 直接失败（fixture 只存 utf8 原文，不静默转码）。 |
 | `DSH_INSTALL_CHECK=1` | `pnpm vitest run tests/packaging-install.test.ts` | 真跑 `dsh plugin add`（一次性 profile `novel-smoke`）→ 断言 bundles 挂载 + `lib/client.js` / `cordis.patch.yml` 就位 → remove。测试自己先 `pnpm build`，忠实复现「源码目录装入」流程。 |
 
@@ -251,8 +255,8 @@ services/reading.ts（ReadingService）── 唯一业务入口，部件装配�
 | `tests/services/intake.test.ts` | 入库四裁决（added / replaced / skipped×2）与替换复用 id、清同键残留、`dedupKey` 口径 |
 | `tests/services/sources.test.ts` | `edit` 原子性与合并落盘（不 flush 磁盘未写、20 次阈值强制落盘、并发 edit 不交错、recipe 抛错仍标脏）；`toPublic` 凭据红线；load 四条存量归一 |
 | `tests/services/import-job.test.ts` | 单槽互斥与结果保留、issues 截断 200、坏文件不拖垮、导入不探针、批量验证并发 ≤5 与运行中删源 |
-| `tests/services/reading.test.ts` | 搜索分组与空数组语义、重定向按落地地址、目录两页三闸与缓存、正文规约与零命中报错不写缓存、ruleDetail* 回退、`__local__` 分流、防孤儿删书、探针同耐心 |
-| `tests/services/probe.test.ts` | 逐词重试与 broken 口径、规则缺失是结果、charset 解不出 `DecodeError`、超时覆盖 |
+| `tests/services/reading.test.ts` | 搜索分组与空数组语义、重定向按落地地址、目录两页翻页闸与缓存、正文规约与零命中报错不写缓存、**目录 URL：逐章回退保留但整本全回退 → `RuleEvalError` 点名 ruleChapterUrl**、ruleDetail* 回退、`__local__` 分流、防孤儿删书、探针同耐心 |
+| `tests/services/probe.test.ts` | 逐词重试与 broken 口径、规则缺失是结果、charset 解不出 `DecodeError`、超时覆盖、**书名 usage 与搜索面一致**（`ruleBookName` 以属性终端收尾时不误判 `broken: 首条书名为空`） |
 | `tests/services/search-face.test.ts` | 条目提取 + landedUrl、规则缺失结果形态、按次超时、POST 选项透传、错误码投影 |
 | `tests/services/request.test.ts` | 选项切分（含逗号空格、单引号 JSON、双重编码 headers）、POST 表单默认头、charset 透传、相对 URL 绝对化、`trimFirstPage`、`stripUrlOption`、`@js` 模板三形态 |
 | `tests/services/fetcher.test.ts` | 非 2xx / 网络 / 超时 → `FetchError`；代理 dispatcher 有无；缺省 UA 与调用方覆盖；解码链四优先级 + 空串声明；`headerOf` 的 Cookie 合并 |
@@ -260,8 +264,10 @@ services/reading.ts（ReadingService）── 唯一业务入口，部件装配�
 | `tests/services/storage.test.ts` | `novelDir` 两态、原子写无 `.tmp` 残留、并发写串行、损坏文件抛 `CorruptJsonError` + `.bak`、防抖合并 |
 | `tests/services/shelf.test.ts` | add 往返与 patch 语义（缺席键保值、显式 undefined 不抹值）、progress 防抖、不在架 `null` |
 | `tests/services/localbooks.test.ts` | 解码链四态、切章正则诸形态、`local:` 形态防穿越、LRU 3 本、越界明确报错、零内容章不产生负长度 |
-| `tests/services/pagination.test.ts` | 回环 / 零新增 / 上限 / 串章四闸逐一 |
+| `tests/services/pagination.test.ts` | URL 防环 / 零新增 / 回环（整页零新增）/ 上限 / 串章（stopUrls 目录知识**取代**启发式——两闸同供时启发式不参与，非页码键分页照常跟进）/ next 列表语义（多候选不递归）/ 页间部分重叠不停 逐一 |
 | `tests/services/chapter-page.test.ts` | 同章后缀形态、下一章拦下、标准页码查询放行、判不准拦下 |
+| `tests/services/url-option.test.ts` | `,{option}` 后缀切分（严格/单引号 JSON、正文 `{a,b}` 不误剥）、`absUrlKeepOption` 绝对化接回、`canonUrl` 比对口径 |
+| `tests/services/content.test.ts` | `looksLikeHtml` 白名单（纯文本正文不误伤）、`htmlToText` 块级换行与脚本/样式整树丢弃、`contentToText` 的 **img 保留为地址行 / noscript 内 img 取回地址而非字面标签 / 预转义实体就地解码且未知实体原样**、**幂等：产物不含标签，二次收口必直通（含 `&lt;p&gt;` 预转义 HTML 串）** |
 | `tests/services/export.test.ts` | N-1 次节流与章格式、失败即停无后续请求、abort 零请求、toc 抛错透传 |
 | `tests/services/error-taxonomy.test.ts` | 每个错误类的类目 / HTTP / ProbeErrorCode 三投影；新类目忘进表编译期报错 |
 | `tests/services/normalize.test.ts` | 三方言映射、必填校验、warning 口径、`bookSourceType` 拒绝非文本、分组拆分与图标剥离 |
@@ -284,3 +290,5 @@ services/reading.ts（ReadingService）── 唯一业务入口，部件装配�
 9. **缺省值多份复制**：`50 * 1024 * 1024`（本地导入上限）在 `index.ts` DEFAULTS、`reading.ts` 的 `create` 与 `from`、`localbooks.ts` 的 `create` 各写一份；`15000` 在 `reading.ts` 与 `fetcher.ts` 各一份；`exportDelayMs` 的 `300` 在 `index.ts` 与 `dispatch.ts` 各一份；`readJsonBody` 的 1MiB 与本地导入的手写流式上限循环是两份字节上限逻辑。生产路径始终显式传值，改错一处不会静默改变业务规则——但这类复制正是「靠注释对齐」的温床。
 10. **`tests/api/routes.test.ts` 以中文文案前缀「未知路由」为判据**（钉措辞而非结构码）：文案一改即整套误红。暂无可替代的机器可读判据——「未知路由 404」与「域 404」的错误码都是 `NotFound`。
 11. **任务态不持久化**：DSH 重启后 `job-status` 返回 null，正在跑的导入进度不可恢复（已落盘的源不丢，导入幂等可重跑）。这是 YAGNI 决策，不是缺口；但「重启后 UI 显示空闲而用户以为任务还在跑」的可能性留给下一个人判断。
+12. **探针 verified 只证明搜索面**：正文链路（目录/正文规则、翻页、js 沙箱语义）的可用性由 `DSH_CONTENT_AUDIT=1` 全链路审计实测（读报告分桶，非通过率门；数据点：2026-09 实测：228 源全 verified，正文全链路修复前仅 25 源全通；三轮 legado 语义补齐后见门控报告——js 段 scriptForm / 沙箱 sloppy 作用域与变量绑定 / 元素包装对象 / **java.ajax 同步语义（worker+SAB RPC 桥）** / AES 解密桥 / cache 垫片 / 取值用途与属性终端 / 模板字面段 / `text.<串>` 选择 / `@put` 裸值键访问 / AllInOne 行内标志 / 方括号索引 / `##` 尾插值 / 中链 jsonpath / 翻页闸（列表 next + 目录知识串章闸）/ 章节 URL 选项保留 / 目录 URL 缺失逐章回退（**整本全回退即如实抛错**）/ 正文 img 保留与实体解码，全部落地，语义与理由见 `docs/design/engine.md`「legado 正文链路语义补齐」）。残余失败的已知边界：`@webjs:`/`sourceRegex`/`webView:true`（WebView 面——legado 本身也只在章节 URL 带 `webView:true` 时走 WebView，属「需要登录/JS 渲染」类，与用户口径一致不计入规则引擎欠账）、`<p1,p2>` URL 页码、`contentRule.subContent`/`title`、方括号索引多条目、jsLib 用 `eval` 的源（Code generation disallowed——安全边界不降级）。网络层失败（FetchError/EmptyToc）需逐源人工甄别死站/反爬/代理，非引擎问题。
+13. **正文串章只有一道闸**：`pagination.ts` 的串章判定是 `stopUrls`（目录知识）**取代**路径启发式，不是叠加（`else if` 形态，接口注释与 `chapter-page.ts` 头注都写明了理由：启发式判不准时宁漏页不串章，而它误拦的 `?id=..&cid=..&page=2` 实测就是一批源「一章只解析出一页」的根因）。残余缺口如实记着：`canonUrl` 会剥 `,{option}` 后缀并按 WHATWG 归一相对地址，但**不归一尾斜杠与 query 参数顺序**——站点「下一页」若与目录条目差在这两处，`stopSet` 漏判且没有第二道闸，下一章正文会被接在本章后面。2026-09 审查复议提议「stopSet 未命中时再走收窄到路径变化的启发式」，**已否决**：收窄后仍会误拦 `/book/1/1.html → /book/1/2.html` 这类路径式同章分页（比现行更糟）。钉子钉住优先级本身（`tests/services/pagination.test.ts` 的 `it('两闸同供时目录知识优先…')`），改双闸必须先过这条钉；漏判的实际发生率只有 `DSH_CONTENT_AUDIT=1` 能出数（本轮未跑）。

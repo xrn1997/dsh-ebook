@@ -97,4 +97,29 @@ describe('ImportPane 接线（deps seam 驱动）', () => {
     expect(screen.getByText(/导入中/)).toBeTruthy()
     expect(screen.queryByText('选择或拖入 legado 书源文件（.json，可多选）')).toBeNull()
   })
+
+  it('onSubmitted（弹层口径）：提交成功即回调——壳层据此关闭弹层，任务在服务端继续', async () => {
+    const deps = makeDeps()
+    const onSubmitted = vi.fn()
+    const { container } = render(
+      <ImportPane job={null} refresh={() => {}} unverifiedCount={0} onVerifyUnverified={() => {}}
+        onSubmitted={onSubmitted} deps={deps} />
+    )
+    const file = new File(['[{"bookSourceName":"A"}]'], 'a.json', { type: 'application/json' })
+    fireEvent.change(fileInput(container), { target: { files: [file] } })
+    await waitFor(() => expect(onSubmitted).toHaveBeenCalledTimes(1))
+  })
+
+  it('onSubmitted 失败半场不触发：提交失败留在弹层内（pushError 上报，不许关窗装成功）', async () => {
+    const deps = makeDeps({ startImportJob: vi.fn(async () => { throw new Error('boom') }) })
+    const onSubmitted = vi.fn()
+    const { container } = render(
+      <ImportPane job={null} refresh={() => {}} unverifiedCount={0} onVerifyUnverified={() => {}}
+        onSubmitted={onSubmitted} deps={deps} />
+    )
+    const file = new File(['x'], 'a.json')
+    fireEvent.change(fileInput(container), { target: { files: [file] } })
+    await waitFor(() => expect(deps.pushError).toHaveBeenCalledTimes(1))
+    expect(onSubmitted).not.toHaveBeenCalled()
+  })
 })

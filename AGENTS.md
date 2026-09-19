@@ -1,11 +1,11 @@
 # dsh-novel — 给 agent 的工作须知
 
-DeepSeek Harness（DSH）的「小说」插件：导入 legado 书源 → 聚合搜索 → 书架 → 连续滚动阅读，并给 AI 助手五个小说工具。双半产物：Node 半（Cordis 插件 + `/novel-api`，`src/{engine,services,api,tools}`）与浏览器半（对话区「小说」视图 + 宿主设置区块，`src/client`）。
+DeepSeek Harness（DSH）的「小说」插件：导入 legado 书源 → 聚合搜索 → 书架 → 连续滚动阅读，并给 AI 助手五个小说工具。双半产物：Node 半（Cordis 插件 + `/novel-api`，`src/{engine,services,api,tools}`）与浏览器半（对话区「小说」视图：书架 / 书城 / 书源管理三 tab，`src/client`）。
 
 ## 真相分层（按顺序读，别跳）
 
 1. **`CONTEXT.md`** — 领域词汇表，每个词条点名它的**唯一实现**位置。命名新 module、改口径、写文档之前先读它：自造同义词会让同一概念长出第二份抄本。
-2. **`docs/design/engine.md` / `services.md` / `client.md`** — 各子系统现状真相：模块地图、关键口径与**为什么**、被否决的方案、测试钉子、**已知开口**。改哪块读哪份（规则求值 → engine；抓取 / 书源 / 书架 / 路由 / 工具 → services；视图 / 阅读器 / 设置页 → client）。**接活先扫一遍对应文档的「已知开口」**——需要拍板的未决项都列在那里。
+2. **`docs/design/engine.md` / `services.md` / `client.md`** — 各子系统现状真相：模块地图、关键口径与**为什么**、被否决的方案、测试钉子、**已知开口**。改哪块读哪份（规则求值 → engine；抓取 / 书源 / 书架 / 路由 / 工具 → services；视图 / 阅读器 / 书源管理 tab → client）。**接活先扫一遍对应文档的「已知开口」**——需要拍板的未决项都列在那里。
 3. **代码与测试** — 最终真相。设计文档与代码冲突时以代码为准，并顺手把文档改正。
 4. **`docs/reference/`** — 外部事实（DSH 插件 API、tsdown 配置）。**`README.md`** — 用户面与命令。
 
@@ -19,7 +19,7 @@ DeepSeek Harness（DSH）的「小说」插件：导入 legado 书源 → 聚合
 
 ## 改完必须验的门（默认全跳过，没人替你跑）
 
-`pnpm test` 全绿只证明引擎 / 服务 / 契约 / 前端逻辑：**不证明**任何真实站点可用性、也不证明安装链路。改动抓取、规则引擎、打包链路时，`README.md`「测试」节的**三条真链路门控**（`DSH_REPROBE` / `COMPAT_CAPTURE` / `DSH_INSTALL_CHECK`）是唯一自动化验证——按那里的命令跑对应那条，并把结论如实写进汇报。
+`pnpm test` 全绿只证明引擎 / 服务 / 契约 / 前端逻辑：**不证明**任何真实站点可用性、也不证明安装链路。`pnpm typecheck` 必须与 `pnpm test` 同批跑：tests 在 tsconfig 内而 vitest 不查类型，props 缝加宽而某个测试文件没跟上只有 tsc 抓得住（2026 审查实证：整轮 UI 改版 944 测试全绿、typecheck 红）。改动抓取、规则引擎、打包链路时，`README.md`「测试」节的**四条真链路门控**（`DSH_REPROBE` / `DSH_CONTENT_AUDIT` / `COMPAT_CAPTURE` / `DSH_INSTALL_CHECK`）是唯一自动化验证——按那里的命令跑对应那条，并把结论如实写进汇报。注意：探针（reprobe）只验**搜索面**，「verified」不证明正文可读；正文链路（目录/正文规则、翻页、js 沙箱）的真机口径是 `DSH_CONTENT_AUDIT=1`（全链路审计 + 失败分桶；**它是审计报告，不设通过率断言**——分桶读数要人判，代码只断言每个注册源都进了审计）。
 
 跑 `pnpm test` 前确认依赖装全：缺 `jsdom` / `@testing-library/react` 会让 6 个前端测试假红（报 `Cannot find module`）。
 

@@ -17,6 +17,7 @@
  *
  * 设计文档：docs/design/engine.md
  */
+import crypto from 'node:crypto'
 import type { EngineValue, EvalContext, Facet, SegmentLoc } from './types.js'
 import { JsSandboxError, UnsupportedRuleError } from './errors.js'
 import type { EvaluateRef, SourceSession } from './js-sandbox.js'
@@ -49,11 +50,12 @@ export interface BridgeDeps {
   contentBase: string | null
 }
 
-/** 沙箱侧挂载点：java 对象（属性名=方法名）/ cookie·source 对象（as 为脚本可见属性名） */
+/** 沙箱侧挂载点：java 对象（属性名=方法名）/ cookie·source·cache 对象（as 为脚本可见属性名） */
 type Mount =
   | { readonly obj: 'java' }
   | { readonly obj: 'cookie'; readonly as: string }
   | { readonly obj: 'source'; readonly as: string }
+  | { readonly obj: 'cache'; readonly as: string }
 
 /** 表行 make 的返回签名约束（仅约束形状；具体参数类型逐行精确声明，供 JavaBridge 推导） */
 type HostFn = (...args: never[]) => unknown
@@ -129,13 +131,24 @@ export const JAVA_PROTOCOL = [
     engineValueToStrings(evalRule(d, String(rule)))),
   method('getElements', { obj: 'java' }, (d) => (rule: string): Array<{ html: string; text: string }> => {
     const v = evalRule(d, String(rule))
-    if (v.kind !== 'nodes') return []
-    return v.nodes.toArray().map((_, i) => ({ html: v.nodes.eq(i).toString(), text: v.nodes.eq(i).text() }))
+    if (v.kind === 'nodes') {
+      return v.nodes.toArray().map((_, i) => ({ html: v.nodes.eq(i).toString(), text: v.nodes.eq(i).text() }))
+    }
+    // 非节点集产物（jsonpath/js 的 value/list）按条目如实映射——legado getElements 对 JSON 数据
+    // 求值的形态（`java.getElements('$.data[*].comicList[*]')`）：条目文本即 html 上下文
+    if (v.kind === 'list') return v.items.map((it) => ({ html: it, text: it }))
+    if (v.kind === 'value') return [{ html: v.text, text: v.text }]
+    return []
   }),
   method('getElement', { obj: 'java' }, (d) => (rule: string): { html: string; text: string } | null => {
     const v = evalRule(d, String(rule))
     // 非 nodes 或空选择集 → null（旧行为 = getElements(rule)[0] ?? null）
-    if (v.kind !== 'nodes' || v.nodes.length === 0) return null
+    if (v.kind === 'miss') return null
+    if (v.kind !== 'nodes') {
+      const items = v.kind === 'list' ? v.items : v.kind === 'value' ? [v.text] : []
+      return items.length === 0 ? null : { html: items[0], text: items[0] }
+    }
+    if (v.nodes.length === 0) return null
     return { html: v.nodes.eq(0).toString(), text: v.nodes.eq(0).text() }
   }),
   method('setContent', { obj: 'java' }, (d) => (content: unknown): void => {
@@ -151,6 +164,12 @@ export const JAVA_PROTOCOL = [
   method('md5Encode16', { obj: 'java' }, () => (s: string): string => md5Hex16(String(s))),
   method('encodeURI', { obj: 'java' }, () => (s: string): string => uriEncode(String(s))),
   method('hexDecodeToString', { obj: 'java' }, () => (hex: string): string => hexDecodeToString(String(hex))),
+  // ── AES 解密桥（legado java.aesBase64DecodeToString：真实源正文解密形态
+  //    `java.aesBase64DecodeToString(data, key, transformation, iv)`——key/iv 为 utf8 字符串，
+  //    PKCS5Padding ≡ PKCS7，Node crypto 原生支持）──
+  method('aesBase64DecodeToString', { obj: 'java' }, (d) =>
+    (data: string, key: string, transformation?: string, iv?: string): string =>
+      aesDecryptB64(String(data), String(key), String(transformation ?? 'AES/CBC/PKCS5Padding'), String(iv ?? ''), d)),
   // ── cookie 垫片（挂 cookie.getCookie/setCookie/removeCookie）─────────
   method('cookieGet', { obj: 'cookie', as: 'getCookie' }, (d) => (name: string): string | null =>
     jar(d).get(String(name)) ?? null),
@@ -185,7 +204,47 @@ export const JAVA_PROTOCOL = [
   method('sourceVarPut', { obj: 'source', as: 'put' }, (d) => (key: string, value: string): void => {
     sourceVars(d).set(String(key), String(value))
   }),
+  // ── cache 垫片（legado CacheManager 最小仿真：按源隔离的进程内键值表，
+  //    真实源 `cache.put('kkmh', …)` 搜索面写、目录面 `cache.get('kkmh')` 读的跨面形态）──
+  method('cacheGet', { obj: 'cache', as: 'get' }, (d) => (key: string): string | null =>
+    sourceVars(d).get(`cache:${String(key)}`) ?? null),
+  method('cachePut', { obj: 'cache', as: 'put' }, (d) => (key: string, value: unknown): void => {
+    sourceVars(d).set(`cache:${String(key)}`, value === null || value === undefined ? '' : String(value))
+  }),
+  method('cacheDelete', { obj: 'cache', as: 'delete' }, (d) => (key: string): void => {
+    sourceVars(d).delete(`cache:${String(key)}`)
+  }),
 ] as const
+
+/** AES 解密（base64 密文 → utf8 明文）：transformation 形如 `AES/CBC/PKCS5Padding`；
+ *  模式不识别 / 密钥或 IV 长度不合法 → 宁炸（JsSandboxError 带定位，不返回假明文） */
+function aesDecryptB64(data: string, key: string, transformation: string, iv: string, d: BridgeDeps): string {
+  const parts = transformation.toUpperCase().split('/')
+  const cipher = parts[0] ?? 'AES'
+  const mode = (parts[1] ?? 'CBC').toLowerCase()
+  const fail = (msg: string): never => {
+    throw new JsSandboxError(msg, { ...d.loc, facet: d.facet, script: d.code })
+  }
+  if (cipher !== 'AES' || (mode !== 'cbc' && mode !== 'ecb')) {
+    return fail(`AES 变换不支持：${transformation}（v1 仅 AES/CBC|ECB + PKCS5/7Padding）`)
+  }
+  const keyBuf = Buffer.from(key, 'utf8')
+  if (![16, 24, 32].includes(keyBuf.length)) {
+    return fail(`AES 密钥长度不合法（${keyBuf.length} 字节，需 16/24/32）`)
+  }
+  const ivBuf = mode === 'ecb' ? null : Buffer.from(iv, 'utf8')
+  if (ivBuf !== null && ivBuf.length !== 16) {
+    return fail(`AES CBC 的 IV 长度不合法（${ivBuf.length} 字节，需 16）`)
+  }
+  try {
+    const algo = `aes-${keyBuf.length * 8}-${mode}`
+    const decipher = crypto.createDecipheriv(algo, keyBuf, ivBuf)
+    decipher.setAutoPadding(true)
+    return Buffer.concat([decipher.update(Buffer.from(data, 'base64')), decipher.final()]).toString('utf8')
+  } catch (e) {
+    return fail(`AES 解密失败：${String((e as Error)?.message ?? e)}`)
+  }
+}
 
 type AnyJavaMethod = (typeof JAVA_PROTOCOL)[number]
 
@@ -203,6 +262,8 @@ export const SANDBOX_MOUNTS = {
   cookie: JAVA_PROTOCOL.flatMap((r) => (r.mount.obj === 'cookie' ? [{ name: r.name, key: r.mount.as }] : [])),
   /** source 对象（__src__）：{ name: 宿主调用名, key: 脚本属性名 } */
   source: JAVA_PROTOCOL.flatMap((r) => (r.mount.obj === 'source' ? [{ name: r.name, key: r.mount.as }] : [])),
+  /** cache 对象（legado CacheManager 最小仿真）：{ name: 宿主调用名, key: 脚本属性名 } */
+  cache: JAVA_PROTOCOL.flatMap((r) => (r.mount.obj === 'cache' ? [{ name: r.name, key: r.mount.as }] : [])),
 }
 
 /**

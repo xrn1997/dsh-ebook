@@ -1,6 +1,6 @@
 import render from 'dom-serializer'
 import { evaluate, RuleEvalError } from '../engine/index.js'
-import type { EngineValue, Facet } from '../engine/index.js'
+import type { EngineValue, Facet, RuleUsage } from '../engine/index.js'
 import { engineFetch } from './engine-fetch.js'
 import { headerOf } from './fetcher.js'
 import type { Fetcher } from './fetcher.js'
@@ -16,9 +16,11 @@ export { engineFetch } from './engine-fetch.js'
  *  `requestedUrl` 只作诊断（两者不同＝被跳转走了，报错里点名，站点整站 302 一眼可见）。 */
 export interface Page { url: string; requestedUrl?: string; body: string; json?: unknown }
 
-/** 条目片段上的子规则求值器：与引擎内部 evaluateRef 同构（片段即 html 上下文） */
+/** 条目片段上的子规则求值器：与引擎内部 evaluateRef 同构（片段即 html 上下文）。
+ *  usage（取值用途）：'value'（getString 口径——链尾未知词 = HTML 属性名）/ 'list'（getElements
+ *  口径——链尾未知词 = 选择器）。服务层按规则用途显式传，缺省沿用引擎的 'list'。 */
 export interface SubRuleEval {
-  (rule: string, ctx: { html?: string; json?: unknown; baseUrl: string }, facet: Facet): Promise<EngineValue>
+  (rule: string, ctx: { html?: string; json?: unknown; baseUrl: string }, facet: Facet, usage?: RuleUsage): Promise<EngineValue>
 }
 
 /** 值规约（链终点取值）：miss→null；value→text；list→join('\n')；matches→取每行首列 join。 */
@@ -62,10 +64,17 @@ export function extractItems(v: EngineValue): string[] {
  *  tocUrlOf 连 source/fetch 都没有。新面接入 = 传参数，不 = 再手拼一份字段。 */
 export function engineContextOf(
   fetcher: Fetcher, source: NovelSource,
-  opts: { baseUrl: string; html?: string; json?: unknown; vars?: Record<string, string> },
+  opts: {
+    baseUrl: string; html?: string; json?: unknown; vars?: Record<string, string>
+    /** legado `book` 变量（脚本可见的书籍身份——目录/正文面常见 `book.bookUrl`） */
+    book?: Record<string, unknown>
+    /** legado `chapter` 变量（章节身份：title/index/url） */
+    chapter?: Record<string, unknown>
+  },
 ): {
   html?: string; json?: unknown; baseUrl: string; source: string
   vars?: Record<string, string>; fetch: ReturnType<typeof engineFetch>; jsLib?: string
+  book?: Record<string, unknown>; chapter?: Record<string, unknown>
 } {
   return {
     ...(opts.html === undefined ? {} : { html: opts.html }),
@@ -75,15 +84,35 @@ export function engineContextOf(
     ...(opts.vars === undefined ? {} : { vars: opts.vars }),
     fetch: engineFetch(fetcher, headerOf(source)),
     ...(source.rules.jsLib === null ? {} : { jsLib: source.rules.jsLib }),
+    ...(opts.book === undefined ? {} : { book: opts.book }),
+    ...(opts.chapter === undefined ? {} : { chapter: opts.chapter }),
   }
 }
 
-/** 缝合器：源级 SubRuleEval——上下文组装走 engineContextOf 单点。 */
-export function makeSubEval(fetcher: Fetcher, source: NovelSource, vars?: Record<string, string>): SubRuleEval {
-  return (rule, ctx, facet) =>
+/** 缝合器：源级 SubRuleEval——上下文组装走 engineContextOf 单点。
+ *  第三参兼容两形态：`Record<string,string>`（历史 vars 形态）或 opts 对象（vars/book/chapter）。 */
+export function makeSubEval(
+  fetcher: Fetcher, source: NovelSource,
+  optsOrVars?: Record<string, string> | { vars?: Record<string, string>; book?: Record<string, unknown>; chapter?: Record<string, unknown> },
+): SubRuleEval {
+  const opts = optsOrVars === undefined
+    ? {}
+    : isVarsShaped(optsOrVars) ? { vars: optsOrVars } : optsOrVars
+  return (rule, ctx, facet, usage) =>
     evaluate(rule, engineContextOf(fetcher, source, {
-      baseUrl: ctx.baseUrl, html: ctx.html, json: ctx.json, vars,
-    }), facet)
+      baseUrl: ctx.baseUrl, html: ctx.html, json: ctx.json,
+      ...(opts.vars === undefined ? {} : { vars: opts.vars }),
+      ...(opts.book === undefined ? {} : { book: opts.book }),
+      ...(opts.chapter === undefined ? {} : { chapter: opts.chapter }),
+    }), facet, usage ?? 'list')
+}
+
+/** 历史 vars 形态判别：全值 string 的对象按 vars 处理（与 opts 对象的键不重叠——vars/book/chapter） */
+function isVarsShaped(
+  v: Record<string, string> | { vars?: Record<string, string>; book?: Record<string, unknown>; chapter?: Record<string, unknown> },
+): v is Record<string, string> {
+  const keys = Object.keys(v)
+  return keys.length > 0 && keys.every((k) => !['vars', 'book', 'chapter'].includes(k))
 }
 
 /** 链终点不该剩节点集：带 facet 与节点数的段级错误（segmentIndex -1 = 服务层规约层） */

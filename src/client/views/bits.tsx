@@ -5,17 +5,27 @@ import type { JobState } from './types.js'
  *  颜色一律走 `--novel-*` 局部 token（由 NovelStyles 的 token 层定义，见 styles.tsx 头注）：
  *  写死 hex 等于钉死一套主题观感，暗态下与宿主调色板不一致。 */
 
+/** 源状态徽标：文案是原始状态字的中文映射（原始状态字不进 UI），取色走 data-status
+ *  属性选择器——颜色的主人是样式层的 --novel-status-*，这里不该再行内挑色。
+ *  状态点是纯装饰：读屏念「● 可用」是噪声，颜色之外没有任何信息。 */
 export function StatusBadge({ status }: { status: string }): ReactNode {
-  // token 引用写在 var() 里，光/暗两态由宿主 alias 层自己切——本组件不做深浅判断
-  const [color, label] = status === 'verified'
-    ? ['var(--novel-status-verified)', '可用']
-    : status === 'broken'
-      ? ['var(--novel-status-broken)', '不可用']
-      : ['var(--novel-status-unverified)', '未验证']
+  const key = status === 'verified' ? 'verified' : status === 'broken' ? 'broken' : 'unverified'
+  const label = key === 'verified' ? '可用' : key === 'broken' ? '不可用' : '未验证'
   return (
-    <span data-novel="badge" className="novel-badge" style={{ color }}>
-      ● {label}
+    <span data-novel="badge" data-status={key} className="novel-badge">
+      <span aria-hidden="true">● </span>{label}
     </span>
+  )
+}
+
+/** 搜索图标（放大镜）：书架头与搜索页的 `.novel-searchbox` 同款（bits = 视图共用小件）。
+ *  aria-hidden：输入框自有 aria-label/placeholder，图标纯装饰不重复播报。 */
+export function SearchIcon(): ReactNode {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" />
+      <path d="M21 21l-4.3-4.3" />
+    </svg>
   )
 }
 
@@ -28,25 +38,25 @@ export interface ApiErrorLike {
 /** 错误横幅：message 红字 + segment 存在时「面#段N」徽标（底/字/徽标全走 token） */
 export function ErrorBanner({ error, onRetry }: { error: ApiErrorLike; onRetry?: () => void }): ReactNode {
   return (
-    <div data-novel="error" className="novel-panel" style={{ background: 'var(--novel-err-weak)', margin: '8px 0' }}>
+    <div data-novel="error" className="novel-panel novel-error-banner">
       {error.segment !== undefined && (
-        <span className="novel-badge-pill" style={{ marginRight: 8 }}>
-          {error.segment.facet}#段{error.segment.segmentIndex}
-        </span>
+        <span className="novel-badge-pill">{error.segment.facet}#段{error.segment.segmentIndex}</span>
       )}
       <span className="novel-err">{error.code ?? 'Error'}: {error.message ?? '未知错误'}</span>
       {onRetry !== undefined && (
-        <button className="novel-btn sm" onClick={onRetry} style={{ marginLeft: 12 }}>重试</button>
+        <button className="novel-btn sm novel-retry" onClick={onRetry}>重试</button>
       )}
     </div>
   )
 }
 
-/** 空态：标题 + 动作按钮组 */
-export function EmptyState({ title, actions }: { title: string; actions?: ReactNode }): ReactNode {
+/** 空态：标题 + 动作按钮组。字色走 --novel-text-2（旧实现写 opacity:.75 = 主动削弱对比度，
+ *  浅色底上会掉到 4.5:1 以下） */
+export function EmptyState({ title, hint, actions }: { title: string; hint?: string; actions?: ReactNode }): ReactNode {
   return (
-    <div data-novel="empty" style={{ textAlign: 'center', padding: '48px 16px', opacity: 0.75 }}>
-      <div style={{ fontSize: 16, marginBottom: 12 }}>{title}</div>
+    <div data-novel="empty" className="novel-empty">
+      <div className="novel-empty-title">{title}</div>
+      {hint === undefined ? null : <div className="novel-empty-hint">{hint}</div>}
       {actions}
     </div>
   )
@@ -65,12 +75,15 @@ export function jobPct(job: Pick<JobState, 'done' | 'total'>): number {
   return job.total === 0 ? 0 : Math.round((job.done / job.total) * 100)
 }
 
-/** 进度段（.novel-progress）：运行卡与状态条迷你条同源——role/aria 三件套只写这一份 */
+/** 进度段（.novel-progress）：运行卡、状态条迷你条与书架卡片同源——role/aria 三件套只写这一份。
+ *  推进走 `--novel-pct` → 样式层 `transform: scaleX()`：改 width 每次触发布局，
+ *  一屏几十张卡 + 搜索条 + 运行卡同时在途就是逐帧重排（合成层只改 transform）。
+ *  元素用 span 而非 div：书架卡片现在是真 <button>，div 不是合法的按钮内容。 */
 export function ProgressBar({ pct, style }: { pct: number; style?: CSSProperties }): ReactNode {
   return (
-    <div className="novel-progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} style={style}>
-      <i style={{ width: `${pct}%` }} />
-    </div>
+    <span className="novel-progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} style={style}>
+      <i style={{ '--novel-pct': String(pct / 100) } as CSSProperties} />
+    </span>
   )
 }
 
@@ -88,13 +101,12 @@ export function RunCard({ label, meta, pct, counts }: {
   counts: ReactNode
 }): ReactNode {
   return (
-    <div data-novel-run-card className="novel-group"
-      style={{ border: '1px solid var(--novel-brand-line)', borderRadius: 10, background: 'var(--novel-brand-soft)', padding: '14px 16px', gap: 8 }}>
-      <div className="novel-toolbar">
+    <div data-novel-run-card className="novel-group novel-run-card">
+      <div className="novel-toolbar novel-run-card-head">
         <strong>{label}</strong>
         <span className="novel-muted">{meta}</span>
-        <span style={{ flex: 1 }} />
-        <span className="novel-muted">可以关掉设置页，任务在服务端继续</span>
+        <span className="novel-grow" />
+        <span className="novel-muted">可以关掉页面，任务在服务端继续</span>
       </div>
       <ProgressBar pct={pct} />
       <div className="novel-toolbar">{counts}</div>

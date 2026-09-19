@@ -1,4 +1,5 @@
 import type { Cheerio, CheerioAPI } from 'cheerio'
+import { isTag } from 'domhandler'
 import type { AnyNode, Element, Text } from 'domhandler'
 import type { EngineValue, Facet, IndexSpec, Segment, SegmentLoc } from './types.js'
 import { RuleEvalError } from './errors.js'
@@ -23,6 +24,19 @@ export function applyIndex<T>(arr: T[], index: IndexSpec | null): T[] | 'miss' {
     const i = index.value < 0 ? arr.length + index.value : index.value
     if (i < 0 || i >= arr.length) return 'miss'
     return [arr[i]]
+  }
+  if (index.kind === 'range') {
+    // 方括号区间（legado ElementsSingle 口径）：闭区间 + 负数从尾数 + 端点越界钳到边界；
+    // step 缺省按方向自动（from>to → -1，即倒序取）——`[-1:0]` = 整表倒序
+    const len = arr.length
+    if (len === 0) return 'miss'
+    const norm = (v: number): number => (v < 0 ? len + v : v)
+    const from = Math.min(len - 1, Math.max(0, norm(index.from)))
+    const to = Math.min(len - 1, Math.max(0, norm(index.to)))
+    const step = index.step !== undefined && index.step !== 0 ? index.step : (from > to ? -1 : 1)
+    const out: T[] = []
+    for (let i = from; step > 0 ? i <= to : i >= to; i += step) out.push(arr[i])
+    return out.length === 0 ? 'miss' : out
   }
   const from = index.from === null ? 0 : (index.from < 0 ? arr.length + index.from : index.from)
   const to = index.to === null ? arr.length : (index.to < 0 ? arr.length + index.to : index.to)
@@ -65,7 +79,11 @@ export function reducePicked<T>(
 
 /**
  * default 段求值：选择段（class/id/tag/child/children）产出节点集；
- * 取值段（text/textAll/ownText/html/all/href/src/content/textNodes）产出字符串值。
+ * 取值段（text/textAll/ownText/html/all/href/src/content/textNodes/attr）产出字符串值。
+ * `text.<串>` / `ownText.<串>`（**带参数**）是选择段——legado 默认方言「按文本选元素」：
+ * AnalyzeByJSoup.getElementsSingle 的 `"text" -> temp.getElementsContainingOwnText(rules[1])`
+ * （不带参数的 `text` 才是取值终端）。真实源 `text.下一页@href`、`text.章节目录@href` 全靠它——
+ * 此前带参数的 text 被当取值段忽略参数，产出整页文本后 `@href` 落空（实测 27 源目录/正文全灭）。
  * 第 2 参 $（CheerioAPI）用于重建节点集与逐节点取值。
  */
 export function evalDefault(
@@ -79,8 +97,18 @@ export function evalDefault(
     throw new RuleEvalError('上游结果不是节点集，无法继续选择', { ...loc, facet, hits: 0 })
   }
 
+  // 按文本选元素（选择段语义）：text.x = 含该文本的元素（legado 口径：own text 包含、忽略大小写）；
+  // ownText.x 是对称形态（legado 默认方言无此选择语义、会落 CSS 恒零命中——我们给「后代文本包含」，
+  // 与 ownText 终端的「直系」口径互为镜像，实测无源依赖、按更有用的方向实现）
+  if ((seg.mode === 'text' || seg.mode === 'ownText') && seg.arg !== null && seg.arg !== '') {
+    const picked = textContaining($, cur, seg.arg, seg.mode === 'text' ? 'own' : 'descendant')
+    return pickNodes(seg, $, picked.toArray(), loc, facet, `${seg.mode}.${seg.arg}`)
+  }
+
   if (!(SELECT_MODES as readonly string[]).includes(seg.mode)) {
-    if ((GET_MODES as readonly string[]).includes(seg.mode)) return getValue(seg, $, cur, loc, facet)
+    if (seg.mode === 'attr' || (GET_MODES as readonly string[]).includes(seg.mode)) {
+      return getValue(seg, $, cur, loc, facet)
+    }
     // classifySegment（parse）已挡掉未知 mode，此处兜底
     throw new RuleEvalError('未知 default 段模式', { ...loc, facet, hits: 0 })
   }
@@ -101,18 +129,52 @@ export function evalDefault(
     throw new RuleEvalError(`选择器无法解析：${seg.mode}.${seg.arg ?? ''}（${(e as Error).message}）`, { ...loc, facet, hits: 0 })
   }
 
-  const pickedArr = picked.toArray()
-  // 空态裁决走 reducePicked 单点：零命中/排除空/越界/切片裁空一律 Miss（选择失败）
+  return pickNodes(seg, $, picked.toArray(), loc, facet, `${seg.mode}.${seg.arg ?? ''}`)
+}
+
+/** 选择结果 → reducePicked 裁决 → nodes/Miss（选择段与文本选择段共用一份空态口径） */
+function pickNodes(
+  seg: DefaultSegment, $: CheerioAPI, pickedArr: AnyNode[],
+  loc: SegmentLoc, facet: Facet, label: string,
+): EngineValue {
   const reduced = reducePicked(pickedArr, seg.exclude, seg.index)
   if (!reduced.ok) {
     const detail =
-      reduced.reason === 'zero' ? `选择 ${seg.mode}.${seg.arg ?? ''} 未命中节点`
-        : reduced.reason === 'excluded' ? `选择 ${seg.mode}.${seg.arg ?? ''} 排除 ${JSON.stringify(seg.exclude)} 后为空`
+      reduced.reason === 'zero' ? `选择 ${label} 未命中节点`
+        : reduced.reason === 'excluded' ? `选择 ${label} 排除 ${JSON.stringify(seg.exclude)} 后为空`
           : reduced.reason === 'oob' ? `位置 ${JSON.stringify(seg.index)} 越界`
             : `位置 ${JSON.stringify(seg.index)} 切片裁空（原集合 ${pickedArr.length} 项）`
     return { kind: 'miss', detail }
   }
   return { kind: 'nodes', nodes: $(reduced.items) }
+}
+
+/**
+ * 按文本选元素：候选 = 当前节点集的全部后代元素（含自身，文档序），
+ * own 口径 = 元素**直系文本**包含 needle（Jsoup getElementsContainingOwnText 同款，忽略大小写）；
+ * descendant 口径 = 全部后代文本包含 needle。
+ */
+function textContaining(
+  $: CheerioAPI, cur: Cheerio<AnyNode>, needle: string, scope: 'own' | 'descendant',
+): Cheerio<AnyNode> {
+  const candidates: AnyNode[] = []
+  const seen = new Set<AnyNode>()
+  // cur 的节点子树互相重叠（链首 $('*') 就是全集）——逐节点下钻必须去重，
+  // 否则同一元素被祖先子树反复收集（`text.下一页@href` 实测一个 href 出 5 份）
+  const visit = (n: AnyNode): void => {
+    if (seen.has(n)) return
+    seen.add(n)
+    if (isTag(n)) candidates.push(n)
+    const kids = (n as Element).children
+    if (kids !== undefined) for (const c of kids) visit(c as AnyNode)
+  }
+  for (const n of cur.toArray()) visit(n)
+  const low = needle.toLowerCase()
+  const hit = candidates.filter((el) => {
+    const text = scope === 'own' ? directText($, el) : $(el).text()
+    return text.toLowerCase().includes(low)
+  })
+  return $(hit)
 }
 
 /**
@@ -140,6 +202,24 @@ function getValue(
     return { kind: 'miss', detail }
   }
   const applied = reduced.items
+
+  // attr 终端（CONTEXT.md「属性终端」）：legado getResultLast else 分支 `element.attr(name)`——
+  // 元素自身属性，空则向下兜底第一个含该属性的后代（与 href/src 同口径，html/body 包装不兜底）；
+  // **空值丢弃 + 去重**（legado 同款）。真实源 ruleBookUrl `@onclick`、`@value`、`@_src` 全靠它。
+  if (seg.mode === 'attr') {
+    const name = seg.arg ?? ''
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const el of applied) {
+      const v = attrFallback($, el, name)
+      if (v === '' || seen.has(v)) continue
+      seen.add(v)
+      out.push(v)
+    }
+    if (out.length === 0) return { kind: 'list', items: [] } // 元素在、取值全空 → 空 List（非 Miss）
+    if (applied.length === 1 && arr.length === 1) return { kind: 'value', text: out[0] }
+    return { kind: 'list', items: out }
+  }
 
   // textNodes：全部后代文本节点的文本列表（逐文本节点输出一条）
   if (seg.mode === 'textNodes') {
@@ -180,6 +260,22 @@ function directText($: CheerioAPI, el: AnyNode): string {
   return $(el).contents().filter((_, node) => node.type === 'text').text()
 }
 
+/** 属性取值兜底单点：自身属性 →（html/body 除外）第一个含该属性的后代 */
+function attrFallback($: CheerioAPI, el: AnyNode, name: string, fallbackSel?: string): string {
+  const own = (el as Element).attribs?.[name] ?? ''
+  if (own !== '') return own
+  const tag = (el as Element).name
+  if (tag === 'html' || tag === 'body') return ''
+  if (fallbackSel !== undefined) return $(el).find(fallbackSel).first().attr(name) ?? ''
+  // 属性名可含冒号（`isAttrName` 放行 `xlink:href` 这类命名空间形态），拼成 CSS 属性选择器会
+  // 炸成逃逸错误分类的裸 Error——按「第一个含该属性的后代」口径直接遍历取值。
+  for (const node of $(el).find('*').toArray()) {
+    const v = (node as Element).attribs?.[name]
+    if (v !== undefined && v !== '') return v
+  }
+  return ''
+}
+
 function extract($: CheerioAPI, el: AnyNode, mode: string): string {
   switch (mode) {
     // text：**全部后代文本**（legado/Jsoup `element.text()` 口径），块级边界落成换行。
@@ -205,20 +301,10 @@ function extract($: CheerioAPI, el: AnyNode, mode: string): string {
     // 兜底会与目标元素自身属性重复出多份同值（@href ×3 → \n 拼接 → URL 解析剥换行拼接成事故），
     // 包装元素一律不兜底——目标元素自身仍在节点集里正常取值。
     case 'href':
-    case 'src': {
-      const own = (el as Element).attribs?.[mode] ?? ''
-      if (own !== '') return own
-      const tag = (el as Element).name
-      if (tag === 'html' || tag === 'body') return ''
-      return $(el).find(`[${mode}]`).first().attr(mode) ?? ''
-    }
-    case 'content': {
-      const own = (el as Element).attribs?.content ?? ''
-      if (own !== '') return own
-      const tag = (el as Element).name
-      if (tag === 'html' || tag === 'body') return ''
-      return $(el).find('meta[content]').first().attr('content') ?? ''
-    }
+    case 'src':
+      return attrFallback($, el, mode)
+    case 'content':
+      return attrFallback($, el, 'content', 'meta[content]')
     default:
       return cleanText($(el).text())
   }

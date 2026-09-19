@@ -21,7 +21,7 @@ const extract = async (page: Page): Promise<string[]> =>
   listValue(await evaluate('@css:.it@textNodes', { html: page.body, baseUrl: page.url }, 'toc'), 'toc') ?? []
 const keyOf = (s: string) => s
 
-describe('followPages 三闸', () => {
+describe('followPages 翻页闸（停止判据次序）', () => {
   it('正常跟完 3 页 → end，items 不重复', async () => {
     const pages = site()
     const r = await followPages('https://x.com/p1', async (u) => pages.get(u)!, extract, 'tag.a.next@href', keyOf, { maxPages: 10 }, 'toc', subEval)
@@ -77,5 +77,92 @@ describe('followPages 三闸', () => {
     expect(r.stoppedBy).toBe('end')
     expect(r.pages).toBe(2)
     expect(r.items).toEqual(['第一页', '第二页'])
+  })
+})
+
+describe('followPages 目录知识闸 + 列表 next + 部分重叠不停（legado 对齐）', () => {
+  it('stopUrls：候选 == 目录里其他章节 URL → chapter-boundary（legado 防串章正判据）', async () => {
+    const pages = new Map<string, Page>([
+      ['https://x.com/c/1', { url: 'https://x.com/c/1', body: '<div class="it">本章正文</div><a class="next" href="/c/2">下一章</a>' }],
+      ['https://x.com/c/2', { url: 'https://x.com/c/2', body: '<div class="it">下一章正文</div>' }],
+    ])
+    const r = await followPages('https://x.com/c/1', async (u) => pages.get(u)!, extract, 'tag.a.next@href', keyOf,
+      { maxPages: 10, stopUrls: new Set(['https://x.com/c/2']) }, 'content', subEval)
+    expect(r.stoppedBy).toBe('chapter-boundary')
+    expect(r.pages).toBe(1)
+    expect(r.items).toEqual(['本章正文'])
+  })
+  it('stopUrls：非页码键分页地址不在目录里 → 照常跟进（路径启发式会误拦的形态）', async () => {
+    const pages = new Map<string, Page>([
+      ['https://x.com/read.php?id=1&cid=10', { url: 'https://x.com/read.php?id=1&cid=10', body: '<div class="it">第一页</div><a class="next" href="/read.php?id=1&cid=10&page=2">下一页</a>' }],
+      ['https://x.com/read.php?id=1&cid=10&page=2', { url: 'https://x.com/read.php?id=1&cid=10&page=2', body: '<div class="it">第二页</div>' }],
+    ])
+    // 目录知识：下一章是 cid=11——分页地址 cid=10&page=2 不在其中 → 放行
+    const r = await followPages('https://x.com/read.php?id=1&cid=10', async (u) => pages.get(u)!, extract, 'tag.a.next@href', keyOf,
+      { maxPages: 10, stopUrls: new Set(['https://x.com/read.php?id=1&cid=11']) }, 'content', subEval)
+    expect(r.stoppedBy).toBe('end')
+    expect(r.pages).toBe(2)
+    expect(r.items).toEqual(['第一页', '第二页'])
+  })
+  it('两闸同供时目录知识优先：stopUrls 在场则路径启发式完全不参与（2026-09 审查复议维持原裁决）', async () => {
+    // 审查建议「stopSet 未命中时再走收窄到路径变化的启发式」——本用例正是那个形态：入口
+    // `/book/1/1.html`、续页 `/book/1/2.html`（路径不同且非前缀，启发式判不同章 → 会漏页），
+    // 只有目录知识知道 `/3.html` 才是下一章。钉在这里，防以后被悄悄改回双闸。
+    const pages = new Map<string, Page>([
+      ['https://x.com/book/1/1.html', { url: 'https://x.com/book/1/1.html', body: '<div class="it">第一页</div><a class="next" href="/book/1/2.html">下一页</a>' }],
+      ['https://x.com/book/1/2.html', { url: 'https://x.com/book/1/2.html', body: '<div class="it">第二页</div><a class="next" href="/book/1/3.html">下一章</a>' }],
+      ['https://x.com/book/1/3.html', { url: 'https://x.com/book/1/3.html', body: '<div class="it">下一章正文</div>' }],
+    ])
+    const r = await followPages('https://x.com/book/1/1.html', async (u) => pages.get(u)!, extract, 'tag.a.next@href', keyOf,
+      {
+        maxPages: 10,
+        sameChapterBase: 'https://x.com/book/1/1.html',
+        stopUrls: new Set(['https://x.com/book/1/3.html']),
+      }, 'content', subEval)
+    expect(r.pages).toBe(2)
+    expect(r.items).toEqual(['第一页', '第二页'])
+    expect(r.stoppedBy).toBe('chapter-boundary')
+  })
+  it('next 规则列表语义：多候选全部抓取且不递归翻页（legado getStringList 口径）', async () => {
+    const pages = new Map<string, Page>([
+      ['https://x.com/p1', {
+        url: 'https://x.com/p1',
+        body: '<div class="it">首页</div><div class="nx"><a href="/q1">A</a><a href="/q2">B</a></div>',
+      }],
+      ['https://x.com/q1', { url: 'https://x.com/q1', body: '<div class="it">页A</div><a class="next" href="/q9">深层</a>' }],
+      ['https://x.com/q2', { url: 'https://x.com/q2', body: '<div class="it">页B</div><a class="next" href="/q9">深层</a>' }],
+      ['https://x.com/q9', { url: 'https://x.com/q9', body: '<div class="it">不该被抓</div>' }],
+    ])
+    const r = await followPages('https://x.com/p1', async (u) => pages.get(u)!, extract, '.nx a@href', keyOf,
+      { maxPages: 10 }, 'toc', subEval)
+    expect(r.pages).toBe(3)
+    expect(r.items).toEqual(['首页', '页A', '页B'])   // q9 不抓（多候选不递归）
+    expect(r.stoppedBy).toBe('end')
+  })
+  it('页间部分重复不判到底：条目去重、继续追 next（legado 目录翻页只按 URL 防环）', async () => {
+    const pages = new Map<string, Page>([
+      ['https://x.com/t1', { url: 'https://x.com/t1', body: '<div class="it">A</div><div class="it">B</div><a class="next" href="/t2">n</a>' }],
+      ['https://x.com/t2', { url: 'https://x.com/t2', body: '<div class="it">B</div><div class="it">C</div><a class="next" href="/t3">n</a>' }],
+      ['https://x.com/t3', { url: 'https://x.com/t3', body: '<div class="it">D</div>' }],
+    ])
+    const r = await followPages('https://x.com/t1', async (u) => pages.get(u)!, extract, 'tag.a.next@href', keyOf,
+      { maxPages: 10 }, 'toc', subEval)
+    expect(r.stoppedBy).toBe('end')
+    expect(r.pages).toBe(3)
+    expect(r.items).toEqual(['A', 'B', 'C', 'D'])   // 此前「出现重复即停」会截断在 t1（只出 A、B）
+  })
+  it('URL 防环：同地址重复出现只抓一次', async () => {
+    let fetches = 0
+    const page = (u: string, body: string, next: string | null): Page => ({
+      url: u, body: `<div class="it">${body}</div>` + (next ? `<a class="next" href="${next}">n</a>` : ''),
+    })
+    const r = await followPages('https://x.com/a', async (u) => {
+      fetches++
+      return u === 'https://x.com/a'
+        ? page(u, '甲', '/b')
+        : page(u, '乙', '/a')   // b 的下一页指回 a
+    }, extract, 'tag.a.next@href', keyOf, { maxPages: 10 }, 'toc', subEval)
+    expect(r.items).toEqual(['甲', '乙'])
+    expect(fetches).toBe(2)     // a 不因回指被二次抓取
   })
 })
